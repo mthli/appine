@@ -9,6 +9,8 @@ on:
       - "core/**"
       - "hosts/android/**"
       - "android/**"
+      - "contrib/android-share-rust/**"
+      - "contrib/android-exec/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain.toml"
@@ -20,6 +22,8 @@ on:
       - "core/**"
       - "hosts/android/**"
       - "android/**"
+      - "contrib/android-share-rust/**"
+      - "contrib/android-exec/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain.toml"
@@ -53,7 +57,7 @@ jobs:
       - name: Install toolchain from rust-toolchain.toml and the Android target
         run: |
           rustup toolchain install
-          rustup target add aarch64-linux-android
+          rustup target add aarch64-linux-android aarch64-unknown-linux-musl
 
       - uses: Swatinem/rust-cache@v2
 
@@ -70,6 +74,11 @@ jobs:
           cache-dependency-path: |
             android/**/*.gradle*
             android/gradle/wrapper/gradle-wrapper.properties
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: contrib/android-exec/go.mod
+          cache-dependency-path: contrib/android-exec/go.sum
 
       - name: Install the NDK
         run: |

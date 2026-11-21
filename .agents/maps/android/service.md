@@ -5,7 +5,7 @@
 >
 > Verified: 2026-11-15 (full mapping: 3 research concerns; 15 claims checked by 3 independent verifiers — 14 confirmed and 1 partial, scoped below; tab-index hash collision recorded)
 >
-> Maintained: 2026-11-19 (targeted verification only since the full mapping; latest change: OpenRC migration and recovery for existing Alpine stores)
+> Maintained: 2026-11-19 (targeted verification only since the full mapping; latest change: OpenRC migration and recovery for existing Alpine stores, and enable metadata requests on the verified root-share socket)
 
 ## Responsibilities
 
@@ -29,13 +29,16 @@ outlives an Activity:
   kept in `Settings`.
 
 Root: `android/app/src/main/java/io/github/mthli/appine/TerminalService.kt`, `Notifications.kt`,
-`Settings.kt`, `Tabs.kt`, `BrowserBridge.kt`, `Diagnostics.kt`.
+`Settings.kt`, `Tabs.kt`, `BrowserBridge.kt`, `AndroidShare.kt`, `SharedDocuments.kt`, `Diagnostics.kt`.
 
 Outside the module: rootfs import, downloads, mirrors and `login.sh` (`android/setup`); the screen
 (`android/terminal`) and its tab bar (`android/tabbar`); the view (`android/vtview`) and rendering (`android/vtrender`);
 sessions' internals and the console adapter (`android/vt`), native terminals and compression
 (`android/vtcore`); the Files app provider
 (`android/documents`); JNI and the kernel API (`android/native`, `kernel/boot`, `kernel/process`).
+
+The external-command entry points share the kernel owned by this service.
+GuestCommands.kt, ExecCommandService.kt and CommandBridge.kt own their dispatch.
 
 ## Key types
 
@@ -119,6 +122,22 @@ sessions' internals and the console adapter (`android/vt`), native terminals and
 
 ## Data flow / lifecycle
 
+### Android folder shares
+
+- `AndroidShare` reconciles configured shares on its own worker for the active machine. For a
+  document tree it checks the persisted read grant, starts `SharedDocuments`, and mounts the
+  bundled guest FUSE client read-only.
+- When the document-tree bridge has a same-process Unix socket, the authorized HTTP backing
+  request resolves a file under the selected tree and gives the guest client a one-shot ticket.
+  The bridge consumes the ticket on the socket and sends a read-only regular-file descriptor only
+  after a successful positional read. Missing tickets and unsupported descriptors keep HTTP reads.
+- For a root-managed read-only share, the root helper can advertise native metadata on its
+  UID-verified socket. The guest helper uses the same inode mapping when a request falls back
+  to HTTP.
+- `AndroidShare` registers the backing socket for the mount's unique source before spawning the
+  guest helper. Stopping the share revokes the VFS backing, unmounts the guest path, and closes the
+  bridge.
+
 ### Start and boot
 
 - `onCreate` creates the four channels, starts foreground (type `specialUse` on API 34+) and takes
@@ -155,6 +174,40 @@ sessions' internals and the console adapter (`android/vt`), native terminals and
 - Boot (`appine-boot` thread): unless the start thread already booted the kernel, run the osclock script without a console (exceptions logged, exit status ignored),
   `Native.boot` (blocks until inittab's boot entries finish), then notify OpenRC services that
   failed to start, if the kernel is still the same.
+
+### Android folder sharing
+
+- Settings stores a list of Android folder sources with one Linux destination per entry. The
+  previous single folder is read using its original destination. A new blank destination resolves
+  to /mnt/android. The service rejects equal and nested destinations.
+- After boot, a worker reconciles the saved entries by destination, keeping unchanged mounts open.
+  Each mount owns its private console, unique device label, and authenticated loopback endpoint.
+  The generation cancels superseded attempts and stale status publications. The guest helper
+  checks that the target is empty, unmounted, and reached without symlinks before mounting.
+- Document trees use persisted read grants, released only when no saved entry uses that tree.
+  The root helper uses file handles relative to an open root, reads its token from stdin, and
+  exits when the pipe closes. Root writes are enabled on both ends.
+- Readiness and failures are reported for each destination. Detach and service destruction
+  close the mount consoles and endpoints.
+
+### Terminal access
+
+- A device-local switch is off by default and paused by privacy mode. The shell client uses
+  IPv4 loopback when the switch is on. ExecCommandService additionally verifies the Android
+  runtime permission and the Messenger sender UID.
+- The shell client starts CommandStartActivity when no listener is present. This transient
+  Activity starts TerminalService without opening a tab; Binder can also start it when Android
+  permits the caller. Both wait for boot and use the configured Linux login account.
+- Pending and running requests suppress idle shutdown. Plain commands use two output pipes and no
+  stdin. Interactive requests use a separate guest console and forward input and row/column changes.
+  The input worker releases all native calls before the console number can be reused. Both modes
+  return a framed exit code. Detach clears the command handle and disabling access closes sockets.
+- The APX3 wire format adds acknowledgment frames for valid requests and console input.
+  The shell client can reopen the no-display launcher on a stalled acknowledgment. Existing
+  APX2 clients continue to receive their original result frames.
+- Interactive sessions acquire a partial wake lock for their lifetime. The CLI on Oplus builds
+  also refreshes the no-display Activity during the session. Exit or disconnection releases the
+  lock and ends these refreshes independently of the saved screen-off run policy.
 
 ### Poll (every 2 s)
 

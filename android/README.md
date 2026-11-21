@@ -26,8 +26,9 @@ The Gradle project for the Android shell (design doc §3 and the `android/*` map
 
 ## Building
 
-Requirements: the Android SDK with NDK 29.0.14206865, JDK 17 or later,
-`rustup target add aarch64-linux-android`, `cargo install cargo-ndk`, Zig 0.17.0 on `PATH`
+Requirements: the Android SDK with NDK 29.0.14206865, JDK 17 or later, Go 1.26 or later,
+`rustup target add aarch64-linux-android aarch64-unknown-linux-musl`,
+`cargo install cargo-ndk`, Zig 0.17.0 on `PATH`
 (or in `ZIG`), the rootfs tarball (`scripts/fetch-rootfs`) and the libghostty-vt source release
 with its Zig packages (`scripts/fetch-ghostty`), both run from the repository root. The Zig
 build then runs offline. Zig also builds the static Linux browser launcher from
@@ -66,6 +67,109 @@ HTTP downloads and leaves 127.0.0.1 alone; clear it afterwards with
 `adb shell settings put global http_proxy :0`. Deleting the setting instead leaves
 `global_http_proxy_host` and `global_http_proxy_port` behind, and the proxy stays in effect
 (with an empty exclusion list, so 127.0.0.1 goes to the proxy too) until the next reboot.
+
+## Sharing Android folders
+
+Open **Settings → Folder sharing** to add, edit or stop a share. The system
+folder picker authorizes a read-only share. With root permission, Appine uses
+its own folder picker and can enable writes to the original Android files.
+
+Set the mount point for each folder. Leaving it blank uses `/mnt/android`.
+Use a different path for each additional folder, for example `/mnt/downloads`
+or `/mnt/photos`. Destinations must be absolute, cannot overlap, and must be
+empty if they already exist. Shares saved with the earlier app keep their
+original `/mnt/appine-android` path.
+
+Open a share to copy its mount point. Saved mounts are restored when the guest
+boots. The APK supplies the FUSE client for Alpine and Debian, and the device
+loopback bridge works offline without SSH.
+
+## Running commands from other apps
+
+Enable **Terminal access** in Appine Settings. It is off by default. Enabling
+it lets apps on this device run Linux commands in Appine. Commands use the
+active distribution and the configured Linux login account. Appine privacy mode pauses terminal access.
+
+### Use the Android shell client
+
+Open **Settings → Integrate into system PATH** and choose one option.
+Either action turns on **Terminal access** when it succeeds. Appine privacy
+mode pauses access.
+
+- **Install module automatically** uses the device's Root manager to install
+  the bundled CLI. Restart Android for `/system/bin/appine` to appear. KernelSU
+  3 and later requires a system-mounting metamodule. If `appine` is missing
+  after reboot, turn off **Unmount modules** for the Android terminal app in
+  KernelSU and reopen that terminal. The same Appine settings row offers
+  **Uninstall module** after installation.
+- **Copy shell command** adds the installed executable path and `exec -it -- bash`
+  to the clipboard. Paste the full command into an Android shell to enter
+  Appine. Copy again after an update, since Android may move the executable.
+
+```sh
+appine exec -it -- bash
+appine exec -- sh -c 'echo output; echo diagnostic >&2; exit 37' >out.txt 2>err.txt
+echo "$?"
+```
+
+The client reuses the running Linux instance. On a cold start it starts the
+service and waits for Linux while the Android terminal stays in front. The
+client uses the device's loopback interface. Disable **Terminal access** in
+Appine to stop connections and running sessions.
+On devices that freeze Appine in the background, the client can resume it
+when a command or terminal input is waiting. Copy the shell command from the
+updated APK to use this behavior. The system PATH module can be reinstalled
+from Settings to update its client.
+
+With `-it`, the command has its own Linux PTY and receives keyboard input,
+Ctrl+C and window-size changes. Its output streams share the PTY. An open shell
+holds a partial wake lock until it exits or disconnects. On Oplus builds,
+the client also refreshes Android's foreground activity state for the duration
+of the shell to prevent background freezing. Without
+`-it`, stdout and stderr are separate and stdin is `/dev/null`.
+
+### Build a standalone Android client
+
+Build with Go 1.26 or later and the Android NDK. On a Linux x86-64 host, set
+`ANDROID_NDK_HOME` to the NDK directory and run this from the repository root.
+
+```sh
+cd contrib/android-exec
+CC="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android30-clang" \
+  CGO_ENABLED=1 GOOS=android GOARCH=arm64 \
+  go build -buildmode=pie -trimpath -ldflags '-s -w' -o appine .
+```
+
+For APKs built with a custom application ID, set `APPINE_PACKAGE` to that ID.
+
+### Android app integration
+
+Let `PKG` be the installed APK's application ID, `io.github.mthli.appine` by default.
+
+1. Declare a `uses-permission` for `PKG.permission.RUN_COMMAND` and request
+   that runtime permission. Declare `PKG` in `queries` if the client checks
+   whether Appine is installed.
+2. Bind with action `PKG.RUN_COMMAND` and explicit component
+   `PKG/io.github.mthli.appine.ExecCommandService`. Use `BIND_AUTO_CREATE`
+   from a visible Activity to allow cold starts. If the device blocks a cold
+   bind, open Appine's launcher Activity and retry the binding.
+3. Send a Messenger message with `what = 1`, a `replyTo` Messenger, and
+   `argv` as a `String[]` in the message's data Bundle. Include the command
+   as `argv[0]`. Keep the binding until all results are read.
+4. Read the reply with `what = 2`. This contains either `error` as a string
+   or `result` as a `ParcelFileDescriptor`. Drain and close the descriptor on
+   a worker thread. Each frame has a one-byte kind and a big-endian
+   four-byte byte count before its payload.
+
+| Kind | Payload |
+| --- | --- |
+| 1 | Raw stdout bytes |
+| 2 | Raw stderr bytes |
+| 3 | Four-byte big-endian exit code, including `128 + signal` for a signal exit |
+| 4 | UTF-8 message for a bridge failure |
+
+The final frame is kind 3 or 4. Each request accepts up to 256 arguments and
+32 KiB of UTF-8 arguments.
 
 ## Open source licenses
 

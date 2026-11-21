@@ -104,9 +104,10 @@ android {
     }
 
     packaging {
-        // Native libraries are stored uncompressed and page-aligned in the APK and mapped directly
-        // from it (also on 16K-page devices)
-        jniLibs.useLegacyPackaging = false
+        // The host CLI and root share helper run from the installed native library directory.
+        jniLibs.useLegacyPackaging = true
+        jniLibs.keepDebugSymbols.add("**/libappine-share.so")
+        jniLibs.keepDebugSymbols.add("**/libappine-cli.so")
     }
 
     lint {
@@ -160,6 +161,14 @@ val browserAsset = tasks.register<BrowserAssetTask>("browserAsset") {
     outputDir.set(layout.buildDirectory.dir("generated/browser/assets"))
 }
 
+val androidShare = tasks.register<AndroidShareTask>("androidShare") {
+    sourceDirectory.set(repoRoot.dir("contrib/android-share-rust"))
+    sources.from(fileTree(repoRoot.dir("contrib/android-share-rust")) {
+        include("src/**/*.rs", "Cargo.toml", "Cargo.lock")
+    })
+    outputDir.set(layout.buildDirectory.dir("generated/androidShare/jniLibs"))
+}
+
 androidComponents {
     onVariants { variant ->
         val suffix = variant.name.replaceFirstChar(Char::uppercase)
@@ -175,8 +184,91 @@ androidComponents {
             outputDir.set(layout.buildDirectory.dir("generated/rust/${variant.name}/jniLibs"))
         }
         variant.sources.jniLibs?.addGeneratedSourceDirectory(buildRust, CargoNdkTask::outputDir)
+        variant.sources.jniLibs?.addGeneratedSourceDirectory(androidShare, AndroidShareTask::outputDir)
         variant.sources.assets?.addGeneratedSourceDirectory(rootfsAsset, RootfsAssetTask::outputDir)
         variant.sources.assets?.addGeneratedSourceDirectory(browserAsset, BrowserAssetTask::outputDir)
+        val terminalClient = tasks.register<TerminalClientTask>("terminalClient$suffix") {
+            sourceDirectory.set(repoRoot.dir("contrib/android-exec"))
+            sources.from(fileTree(repoRoot.dir("contrib/android-exec")) {
+                include("*.go", "go.mod", "go.sum")
+            })
+            ndkDirectory.set(androidComponents.sdkComponents.ndkDirectory.map { it.asFile.path })
+            applicationId.set(variant.applicationId)
+            outputDir.set(layout.buildDirectory.dir("generated/terminalClient/${variant.name}/jniLibs"))
+        }
+        variant.sources.jniLibs?.addGeneratedSourceDirectory(terminalClient, TerminalClientTask::outputDir)
+    }
+}
+
+/** The APK's standalone Android shell client. */
+abstract class TerminalClientTask : DefaultTask() {
+    @get:Internal
+    abstract val sourceDirectory: DirectoryProperty
+
+    @get:InputFiles
+    abstract val sources: ConfigurableFileCollection
+
+    @get:Input
+    abstract val ndkDirectory: Property<String>
+
+    @get:Input
+    abstract val applicationId: Property<String>
+
+    @get:OutputDirectory
+    abstract val outputDir: DirectoryProperty
+
+    @get:Inject
+    abstract val exec: ExecOperations
+
+    @TaskAction
+    fun build() {
+        val compilers = File(ndkDirectory.get(), "toolchains/llvm/prebuilt")
+        val compiler = compilers.listFiles().orEmpty()
+            .map { it.resolve("bin/aarch64-linux-android30-clang") }
+            .firstOrNull { it.isFile && it.canExecute() }
+            ?: throw GradleException("Could not find the Android ARM64 compiler in $compilers")
+        val directory = outputDir.get().dir("arm64-v8a").asFile.apply { mkdirs() }
+        exec.exec {
+            workingDir = sourceDirectory.get().asFile
+            environment("CC", compiler.path)
+            environment("CGO_ENABLED", "1")
+            environment("GOOS", "android")
+            environment("GOARCH", "arm64")
+            val flags = "-s -w -X main.defaultPackage=${applicationId.get()}"
+            commandLine("go", "build", "-mod=readonly", "-buildmode=pie", "-trimpath", "-ldflags", flags,
+                "-o", directory.resolve("libappine-cli.so").path, ".")
+        }
+    }
+}
+
+/** The optional root storage bridge, executable from Android's installed native library path. */
+abstract class AndroidShareTask : DefaultTask() {
+    @get:Internal
+    abstract val sourceDirectory: DirectoryProperty
+
+    @get:InputFiles
+    abstract val sources: ConfigurableFileCollection
+
+    @get:OutputDirectory
+    abstract val outputDir: DirectoryProperty
+
+    @get:Inject
+    abstract val exec: ExecOperations
+
+    @TaskAction
+    fun build() {
+        val directory = outputDir.get().dir("arm64-v8a").asFile.apply { mkdirs() }
+        val build = temporaryDir.resolve("cargo")
+        val target = "aarch64-unknown-linux-musl"
+        exec.exec {
+            workingDir = sourceDirectory.get().asFile
+            environment("CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER", "rust-lld")
+            val cargo = File(System.getProperty("user.home"), ".cargo/bin/cargo")
+                .takeIf { it.canExecute() }?.path ?: "cargo"
+            commandLine(cargo, "build", "--locked", "--release", "--target", target,
+                "--target-dir", build.path)
+        }
+        build.resolve("$target/release/appine-share").copyTo(File(directory, "libappine-share.so"), overwrite = true)
     }
 }
 

@@ -291,4 +291,65 @@
     <string name="copy_report">复制报告</string>
     <string name="report_copied">已复制报告</string>
 
+
+    <!-- Android directory mount -->
+    <string name="share_title">共享文件夹</string>
+    <string name="share_off">未共享</string>
+    <string name="share_starting">正在共享…</string>
+    <string name="share_android_folder">手机文件夹</string>
+    <string name="share_android_folder_unknown">已选文件夹</string>
+    <string name="share_mode_read_only">只读</string>
+    <string name="share_mode_read_write">读写</string>
+    <string name="share_mount_point">挂载点</string>
+    <string name="share_copy_path">复制路径</string>
+    <string name="share_path_copied">路径已复制</string>
+    <string name="share_root_failed">无法打开安卓路径。请确认路径并允许 Appine 使用 root。</string>
+    <string name="share_tree_failed">无法读取所选文件夹，请重新选择后再试。</string>
+    <string name="share_mount_failed">共享失败，请重新选择文件夹。</string>
+    <string name="share_pick">选择文件夹</string>
+    <string name="share_change">更换文件夹</string>
+    <string name="share_root">前往路径</string>
+    <string name="share_confirm">共享文件夹</string>
+    <string name="share_access_write">Linux 可以新建、修改和删除文件</string>
+    <string name="share_disconnect">停止共享</string>
+    <string name="share_writable">允许修改原文件</string>
+    <string name="share_mount">开始共享</string>
+    <string name="share_invalid_path">请输入安卓绝对路径</string>
+    <string name="share_parent">返回上一级</string>
+    <string name="share_folder_read_failed">无法打开这个文件夹。</string>
+    <plurals name="share_count">
+        <item quantity="other">%d 个文件夹</item>
+    </plurals>
+    <string name="share_add">添加文件夹</string>
+    <string name="share_edit">编辑</string>
+    <string name="share_save">保存</string>
+    <string name="share_target_helper">留空使用 %1$s</string>
+    <string name="share_invalid_target">请输入绝对路径</string>
+    <string name="share_target_conflict">挂载点重复或重叠</string>
+    <string name="command_access">终端接入</string>
+    <string name="command_access_summary">允许本机应用运行 Appine 中的 Linux 命令</string>
+    <string name="command_client_copy_shell">复制进入 Shell 的命令</string>
+    <string name="command_client_title">集成到系统路径</string>
+    <string name="command_client_summary">管理命令行模块或复制命令</string>
+    <string name="command_client_install">自动安装模块</string>
+    <string name="command_client_working">正在更新模块…</string>
+    <string name="command_client_installed">模块已安装。重启手机后可直接运行 appine</string>
+    <string name="command_client_installed_title">模块已安装</string>
+    <string name="command_client_installed_ksu">重启手机后运行 appine。\n\n如果仍找不到命令，请在 KernelSU 中打开你所用终端的应用配置，切到「自定义」并关闭「卸载模块」，再重新打开终端。</string>
+    <string name="command_client_uninstall">卸载模块</string>
+    <string name="command_client_confirm_uninstall">重启手机后，系统路径中的 appine 命令将被移除。</string>
+    <string name="command_client_removal_pending">重启手机以完成模块卸载</string>
+    <string name="command_client_uninstalled">模块已卸载</string>
+    <string name="command_client_uninstall_failed">无法卸载 Appine 命令行模块</string>
+    <string name="command_client_no_root">需要授予 Root 权限</string>
+    <string name="command_client_no_manager">找不到支持的 Root 管理器</string>
+    <string name="command_client_no_mount">请先在 KernelSU 中配置系统挂载</string>
+    <string name="command_client_mount_pending">KernelSU 的挂载模块有待生效的更改，请重启手机后重试</string>
+    <string name="command_client_mount_disabled">KernelSU 的挂载模块已停用，请启用后重启手机再试</string>
+    <string name="command_client_install_failed">无法安装 Appine 命令行模块</string>
+    <string name="command_client_copied">已复制 Shell 命令</string>
+    <string name="command_client_unavailable">找不到 Appine 命令行工具</string>
+    <string name="command_access_paused">隐私模式下暂停</string>
+    <string name="command_permission">在 Appine 中执行 Linux 命令</string>
+    <string name="command_permission_description">获授权的应用可以在 Appine 中执行命令并读取结果。</string>
 </resources>

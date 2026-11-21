@@ -1400,7 +1400,7 @@ impl Pseudo for View<'_> {
                     FileKind::Pipe(_) => mode::S_IFIFO,
                     FileKind::Socket(_) => mode::S_IFSOCK,
                     FileKind::Host(fd) => {
-                        appine_hal::fstat(*fd).map_err(Errno)?.st_mode as u32 & mode::S_IFMT
+                        appine_hal::fstat(fd.raw()).map_err(Errno)?.st_mode as u32 & mode::S_IFMT
                     }
                     _ => mode::S_IFREG,
                 }
@@ -1759,12 +1759,12 @@ pub(crate) fn describe(f: &OpenFile) -> Vec<u8> {
         FileKind::Bpf(_) => b"anon_inode:bpf-prog".to_vec(),
         FileKind::TimerFd(_) => b"anon_inode:[timerfd]".to_vec(),
         FileKind::SignalFd(_) => b"anon_inode:[signalfd]".to_vec(),
-        FileKind::Host(fd) => std::fs::read_link(format!("/proc/self/fd/{fd}"))
+        FileKind::Host(fd) => std::fs::read_link(format!("/proc/self/fd/{}", fd.raw()))
             .map(|p| {
                 use std::os::unix::ffi::OsStringExt;
                 p.into_os_string().into_vec()
             })
-            .unwrap_or_else(|_| format!("host:[{fd}]").into_bytes()),
+            .unwrap_or_else(|_| format!("host:[{}]", fd.raw()).into_bytes()),
         _ => b"anon_inode:[unknown]".to_vec(),
     }
 }

@@ -28,8 +28,9 @@
 //!
 //! Nodes are kept by node id per instance until the instance goes; the kernel never sends
 //! `FUSE_FORGET`, so the daemon keeps every node it has looked up while mounted. There is no page
-//! cache: reads and writes go to the daemon as they come (as with `FOPEN_DIRECT_IO`), and
-//! mappings copy the file ([`snapshot`]).
+//! cache. Reads and writes normally go to the daemon as they come (as with `FOPEN_DIRECT_IO`).
+//! An authorized read-only Android share can back ordinary reads with an open host file.
+//! Mappings copy the file ([`snapshot`]).
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
@@ -443,6 +444,83 @@ impl Options {
     }
 }
 
+// A backing handle is issued only by the APK's read-only share client on a registered mount.
+// The remaining bits are a handle already opened within the host share's directory.
+const APPINE_BACKING_HANDLE: u64 = 1 << 63;
+
+/// Host access to opened files of one authorized, read-only FUSE share.
+pub trait FuseBacking: Send + Sync {
+    fn duplicate(&self, remote: u64) -> Option<std::fs::File>;
+
+    /// Open a regular file read-only and return its share-local release ticket and descriptor.
+    fn open_file(&self, _node: u64) -> Option<(u64, std::fs::File)> {
+        None
+    }
+
+    /// Queue a direct-open ticket for release without blocking while the kernel lock is held.
+    /// False leaves the ordinary FUSE release responsible for the ticket.
+    fn try_release_file(&self, _id: u64) -> bool {
+        false
+    }
+
+    fn supports_metadata(&self) -> bool {
+        false
+    }
+
+    /// A host reply in FUSE wire format, or None when the daemon should handle the request.
+    fn metadata(&self, _opcode: u32, _node: u64, _args: &[u8]) -> Option<Result<Vec<u8>, i32>> {
+        None
+    }
+}
+
+pub(crate) struct BackingMount {
+    provider: std::sync::Arc<dyn FuseBacking>,
+    active: AtomicBool,
+    reported_read: AtomicBool,
+    reported_open: AtomicBool,
+    reported_mapping: AtomicBool,
+    reported_release: AtomicBool,
+    reported_metadata: std::sync::atomic::AtomicU32,
+}
+
+pub(crate) struct BackedFile {
+    mount: std::sync::Arc<BackingMount>,
+    file: std::fs::File,
+    // The daemon has its own open record for FUSE_OPEN. Only socket opens can release directly.
+    ticket: Option<u64>,
+}
+
+impl BackedFile {
+    pub(crate) fn try_read_at(
+        &self,
+        cx: &mut Cx<'_>,
+        conn: &Rc<RefCell<Conn>>,
+        buffer: &mut [u8],
+        offset: u64,
+        mapping: bool,
+    ) -> Option<Result<usize, Errno>> {
+        use std::os::unix::fs::FileExt;
+        let available = || !conn.borrow().aborted && self.mount.active.load(Ordering::Acquire);
+        if !available() {
+            return Some(Err(Errno::ENOTCONN));
+        }
+        let result = cx.unlocked(|| self.file.read_at(buffer, offset));
+        if !available() {
+            return Some(Err(Errno::ENOTCONN));
+        }
+        // A host descriptor can be unusable for data even when opening it succeeded.
+        let count = result.ok()?;
+        if mapping {
+            if !self.mount.reported_mapping.swap(true, Ordering::Relaxed) {
+                eprintln!("appine: read-only FUSE backing mapping active");
+            }
+        } else if !self.mount.reported_read.swap(true, Ordering::Relaxed) {
+            eprintln!("appine: read-only FUSE backing read active");
+        }
+        Some(Ok(count))
+    }
+}
+
 // ---- Connections ----
 
 /// One FUSE connection (Linux's `struct fuse_conn` with its input queue): the instance's options,
@@ -466,6 +544,7 @@ pub(crate) struct Conn {
     /// The most data one write and one read request carry.
     pub max_write: u32,
     pub max_read: u32,
+    pub(crate) backing: Option<std::sync::Arc<BackingMount>>,
     /// Operations the daemon answered ENOSYS (Linux's `no_*` flags), not asked again.
     pub no: u64,
     /// Device files attached to the connection: the last one closing aborts it.
@@ -564,6 +643,7 @@ impl Conn {
             flags: 0,
             max_write: PAGE,
             max_read: max_read.clamp(PAGE, DEFAULT_MAX_PAGES * PAGE),
+            backing: None,
             no: 0,
             devs: 0,
             next_unique: 2,
@@ -588,14 +668,7 @@ impl Conn {
     /// IDs are all the mounter's (root included).
     pub fn allows(&self, cred: &Cred) -> bool {
         if self.opts.allow_other {
-            let mut ns = Some(cred.user_ns.clone());
-            while let Some(n) = ns {
-                if Rc::ptr_eq(&n, &self.user_ns) {
-                    return true;
-                }
-                ns = n.parent.clone();
-            }
-            return false;
+            return self.user_ns.is_ancestor_of(&cred.user_ns);
         }
         let (u, g) = (self.opts.user_id, self.opts.group_id);
         [cred.euid, cred.suid, cred.ruid]
@@ -1321,6 +1394,7 @@ fn notification(
 pub(crate) struct Fuses {
     /// Connections by their instance's device number (bind mounts share their source's).
     conns: HashMap<u64, Rc<RefCell<Conn>>>,
+    backings: HashMap<Vec<u8>, std::sync::Arc<BackingMount>>,
     nodes: HashMap<FuseId, Node>,
     /// The node of each (device number, node id).
     by_nodeid: HashMap<(u64, u64), FuseId>,
@@ -1395,6 +1469,34 @@ fn fresh(until: Option<Instant>, t: u64) -> bool {
 }
 
 impl Fuses {
+    pub(crate) fn set_backing(
+        &mut self,
+        source: Vec<u8>,
+        provider: Option<std::sync::Arc<dyn FuseBacking>>,
+    ) {
+        if let Some(previous) = self.backings.remove(&source) {
+            previous.active.store(false, Ordering::Release);
+        }
+        if let Some(provider) = provider {
+            self.backings.insert(
+                source,
+                std::sync::Arc::new(BackingMount {
+                    provider,
+                    active: AtomicBool::new(true),
+                    reported_read: AtomicBool::new(false),
+                    reported_open: AtomicBool::new(false),
+                    reported_mapping: AtomicBool::new(false),
+                    reported_release: AtomicBool::new(false),
+                    reported_metadata: std::sync::atomic::AtomicU32::new(0),
+                }),
+            );
+        }
+    }
+
+    pub(crate) fn backing(&self, source: &[u8]) -> Option<std::sync::Arc<BackingMount>> {
+        self.backings.get(source).cloned()
+    }
+
     /// Adds the connection of a new instance and its root directory (mode `rootmode`, attributes
     /// not yet fetched, as 6.1's `fuse_get_root_inode` makes it); returns the root's node.
     pub fn add(&mut self, conn: Rc<RefCell<Conn>>) -> FuseId {
@@ -1856,6 +1958,7 @@ pub(crate) fn attr_out(reply: &[u8], ns: &UserNs) -> Result<(Attr, Option<Instan
 pub(crate) enum Query {
     Lookup(FuseId, Vec<u8>),
     Getattr(FuseId),
+    OpenAttr(FuseId, u64),
     Readlink(FuseId),
     /// A program to execute, read whole ([`program`]).
     Program(FuseId),
@@ -1872,6 +1975,10 @@ thread_local! {
     /// dropped when the next syscall starts.
     #[allow(clippy::missing_const_for_thread_local)] // already const; Android clippy misfires
     static PROGRAMS: std::cell::RefCell<Vec<(FuseId, std::fs::File)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    // A pathname and an already-open file can name different inodes after replacement.
+    #[allow(clippy::missing_const_for_thread_local)]
+    static OPEN_ATTRS: std::cell::RefCell<Vec<(FuseId, u64, Attr)>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
@@ -1899,6 +2006,7 @@ pub(crate) fn new_syscall() {
     if PROGRAMS.with_borrow(|p| !p.is_empty()) {
         PROGRAMS.with_borrow_mut(Vec::clear);
     }
+    OPEN_ATTRS.with_borrow_mut(Vec::clear);
 }
 
 /// Records that `q` must be asked before the syscall can go on, and returns the error that takes
@@ -1923,11 +2031,16 @@ pub(crate) fn serve(cx: &mut Cx<'_>) -> Result<(), Errno> {
             Err(e) => Err(e),
         },
         Query::Getattr(id) => getattr(cx, &vfs, id, None).map(|_| ()),
+        Query::OpenAttr(id, fh) => {
+            let (attr, _) = request_attr(cx, &vfs, id, Some(fh))?;
+            OPEN_ATTRS.with_borrow_mut(|open| open.push((id, fh, attr)));
+            Ok(())
+        }
         Query::Program(id) => {
             use crate::fd::oflags;
             let h = open(cx, &vfs, id, oflags::O_RDONLY | oflags::O_LARGEFILE, false)?;
             let size = getattr(cx, &vfs, id, Some(h.fh))?.size;
-            let copy = snapshot(cx, (&h.conn, h.nodeid, h.fh, h.flags), 0, size)?;
+            let copy = snapshot(cx, &h, 0, size)?;
             drop(h);
             PROGRAMS.with_borrow_mut(|p| p.push((id, copy)));
             Ok(())
@@ -1951,6 +2064,66 @@ pub(crate) fn target(vfs: &super::Vfs, id: FuseId) -> Result<(Rc<RefCell<Conn>>,
     Ok((conn, f.node(id).nodeid))
 }
 
+fn backing_call<T>(
+    cx: &mut Cx<'_>,
+    conn: &Rc<RefCell<Conn>>,
+    nodeid: u64,
+    call: impl FnOnce(&dyn FuseBacking) -> Option<T> + Send,
+) -> Option<Result<(std::sync::Arc<BackingMount>, T), Errno>> {
+    let backing = conn.borrow().backing.clone()?;
+    if !backing.provider.supports_metadata() {
+        return None;
+    }
+    if !backing.active.load(Ordering::Acquire) {
+        return Some(Err(Errno::ENOTCONN));
+    }
+    // Keep the node alive during the native request, just as a queued FUSE request does.
+    *conn.borrow_mut().opens.entry(nodeid).or_insert(0) += 1;
+    let pin = Released {
+        conn: conn.clone(),
+        nodeid,
+        release: None,
+        ticket: None,
+    };
+    let reply =
+        wait_init(cx, conn, false).map(|()| cx.unlocked(|| call(backing.provider.as_ref())));
+    if !pin.send() {
+        RELEASED.with(|q| q.borrow_mut().0.push(pin));
+    }
+    if conn.borrow().aborted || !backing.active.load(Ordering::Acquire) {
+        return Some(Err(Errno::ENOTCONN));
+    }
+    match reply {
+        Err(e) => Some(Err(e)),
+        Ok(reply) => reply.map(|out| Ok((backing, out))),
+    }
+}
+
+fn backing_metadata(
+    cx: &mut Cx<'_>,
+    conn: &Rc<RefCell<Conn>>,
+    opcode: u32,
+    nodeid: u64,
+    args: &[u8],
+) -> Option<Result<Vec<u8>, Errno>> {
+    let (backing, reply) =
+        match backing_call(cx, conn, nodeid, |p| p.metadata(opcode, nodeid, args))? {
+            Ok(result) => result,
+            Err(e) => return Some(Err(e)),
+        };
+    match reply {
+        Ok(out) => {
+            let bit = 1 << opcode;
+            if backing.reported_metadata.fetch_or(bit, Ordering::Relaxed) & bit == 0 {
+                eprintln!("appine: read-only FUSE backing metadata active opcode={opcode}");
+            }
+            Some(Ok(out))
+        }
+        Err(e) if ![Errno::ENOSYS.0, Errno::EOPNOTSUPP.0].contains(&e) => Some(Err(Errno(e))),
+        _ => None,
+    }
+}
+
 /// `FUSE_LOOKUP` of `name` in directory `dir` (6.1's `fuse_lookup_name`), cached: the node, or
 /// ENOENT (a negative entry, cached for its validity; an ENOENT error only for this syscall).
 pub(crate) fn lookup(
@@ -1963,7 +2136,10 @@ pub(crate) fn lookup(
         return Err(Errno::ENAMETOOLONG);
     }
     let (conn, nodeid) = target(vfs, dir)?;
-    let reply = match call(cx, &conn, op::LOOKUP, nodeid, &Args::default().name(name).0) {
+    let args = Args::default().name(name);
+    let reply = match backing_metadata(cx, &conn, op::LOOKUP, nodeid, &args.0)
+        .unwrap_or_else(|| call(cx, &conn, op::LOOKUP, nodeid, &args.0))
+    {
         Err(Errno::ENOENT) => {
             vfs.fuse_mut().enter_negative(dir, name, None);
             return Err(Errno::ENOENT);
@@ -1988,22 +2164,32 @@ pub(crate) fn getattr(
     id: FuseId,
     fh: Option<u64>,
 ) -> Result<Attr, Errno> {
+    let (attr, until) = request_attr(cx, vfs, id, fh)?;
+    vfs.fuse_mut().set_attr(id, attr, until);
+    Ok(attr)
+}
+
+fn request_attr(
+    cx: &mut Cx<'_>,
+    vfs: &super::Vfs,
+    id: FuseId,
+    fh: Option<u64>,
+) -> Result<(Attr, Option<Instant>), Errno> {
     const GETATTR_FH: u32 = 1;
     let (conn, nodeid) = target(vfs, id)?;
     let args = Args::default()
         .u32(if fh.is_some() { GETATTR_FH } else { 0 })
         .u32(0)
         .u64(fh.unwrap_or(0));
-    let reply = call(cx, &conn, op::GETATTR, nodeid, &args.0)?;
+    let reply = backing_metadata(cx, &conn, op::GETATTR, nodeid, &args.0)
+        .unwrap_or_else(|| call(cx, &conn, op::GETATTR, nodeid, &args.0))?;
     let ns = conn.borrow().user_ns.clone();
     let (attr, until) = attr_out(&reply, &ns)?;
-    let mut f = vfs.fuse_mut();
-    let old = f.get(id).ok_or(Errno::ENOTCONN)?.attr.mode;
+    let old = vfs.fuse().get(id).ok_or(Errno::ENOTCONN)?.attr.mode;
     if (attr.mode ^ old) & mode::S_IFMT != 0 {
         return Err(Errno::EIO);
     }
-    f.set_attr(id, attr, until);
-    Ok(f.node(id).attr)
+    Ok((attr, until))
 }
 
 /// Node `id`'s attributes from the cache, or a retry to fetch them ([`need`]).
@@ -2014,6 +2200,28 @@ pub(crate) fn cached_attr(vfs: &super::Vfs, id: FuseId) -> Result<Attr, Errno> {
         Some(a) => Ok(*a),
         None => Err(need(Query::Getattr(id))),
     }
+}
+
+/// Attributes of a file opened on the root backing, cached only in this syscall.
+pub(crate) fn opened_attr(vfs: &super::Vfs, handle: &Handle) -> Result<Attr, Errno> {
+    if handle.backing.is_none()
+        || !handle
+            .conn
+            .borrow()
+            .backing
+            .as_ref()
+            .is_some_and(|b| b.provider.supports_metadata())
+    {
+        return cached_attr(vfs, handle.id);
+    }
+    let (id, fh) = (handle.id, handle.fh);
+    OPEN_ATTRS
+        .with_borrow(|open| {
+            open.iter()
+                .find(|(node, file, _)| (*node, *file) == (id, fh))
+                .map(|(_, _, attr)| *attr)
+        })
+        .ok_or_else(|| need(Query::OpenAttr(id, fh)))
 }
 
 // ---- Open files ----
@@ -2033,9 +2241,26 @@ pub(crate) struct Handle {
     pub dir: bool,
     /// No open was made (`FUSE_NO_OPEN_SUPPORT`): there is nothing to release.
     pub no_release: bool,
+    pub backing: Option<std::sync::Arc<BackedFile>>,
+    pub directory_snapshot: Option<Rc<Vec<super::store::DirEntry>>>,
 }
 
 impl Handle {
+    pub(crate) fn check_directory(&self) -> Result<(), Errno> {
+        if self.directory_snapshot.is_some() {
+            let conn = self.conn.borrow();
+            if conn.aborted
+                || !conn
+                    .backing
+                    .as_ref()
+                    .is_some_and(|m| m.active.load(Ordering::Acquire))
+            {
+                return Err(Errno::ENOTCONN);
+            }
+        }
+        Ok(())
+    }
+
     /// Counts it among the node's open handles ([`Conn::opens`]), which keep the node from being
     /// forgotten until it goes.
     pub(crate) fn counted(self) -> Handle {
@@ -2057,10 +2282,15 @@ impl Drop for Handle {
             let args = Args::default().u64(self.fh).u32(self.flags).u32(0).u64(0);
             (opcode, args.0)
         });
+        let ticket = self
+            .backing
+            .as_ref()
+            .and_then(|file| file.ticket.map(|id| (file.mount.clone(), id)));
         let r = Released {
             conn: self.conn.clone(),
             nodeid: self.nodeid,
             release,
+            ticket,
         };
         if !r.send() {
             RELEASED.with(|q| q.borrow_mut().0.push(r));
@@ -2074,6 +2304,7 @@ struct Released {
     conn: Rc<RefCell<Conn>>,
     nodeid: u64,
     release: Option<(u32, Vec<u8>)>,
+    ticket: Option<(std::sync::Arc<BackingMount>, u64)>,
 }
 
 impl Released {
@@ -2089,6 +2320,14 @@ impl Released {
             }
         }
         drop(c);
+        if let Some((mount, id)) = &self.ticket
+            && mount.provider.try_release_file(*id)
+        {
+            if !mount.reported_release.swap(true, Ordering::Relaxed) {
+                eprintln!("appine: read-only FUSE backing release active");
+            }
+            return true;
+        }
         if let Some((opcode, args)) = &self.release {
             background(&self.conn, *opcode, self.nodeid, args);
         }
@@ -2155,9 +2394,44 @@ pub(crate) fn open(
             flags: sent,
             dir,
             no_release,
+            backing: None,
+            directory_snapshot: None,
         }
         .counted()
     };
+    if dir && conn.borrow().backing.is_some() {
+        let parent = {
+            let fs = vfs.fuse();
+            fs.node(fs.node(id).parent).nodeid
+        };
+        if let Some(reply) = backing_metadata(cx, &conn, op::READDIR, nodeid, &parent.to_le_bytes())
+        {
+            let mut entries = Vec::new();
+            if parse_dirents(&reply?, &mut entries).is_ok() {
+                let mut h = handle(0, 0, true);
+                h.directory_snapshot = Some(Rc::new(entries));
+                return Ok(h);
+            }
+        }
+    }
+    let open_mask = oflags::O_ACCMODE | oflags::O_APPEND | oflags::O_TRUNC;
+    if !dir
+        && sent & open_mask == oflags::O_RDONLY
+        && let Some(result) = backing_call(cx, &conn, nodeid, |p| p.open_file(nodeid))
+    {
+        let (mount, (remote, file)) = result?;
+        // The read-only root helper has a no-op flush for these opens.
+        let mut h = handle(APPINE_BACKING_HANDLE | remote, fopen::NOFLUSH, false);
+        if !mount.reported_open.swap(true, Ordering::Relaxed) {
+            eprintln!("appine: read-only FUSE backing open active");
+        }
+        h.backing = Some(std::sync::Arc::new(BackedFile {
+            mount,
+            file,
+            ticket: Some(remote),
+        }));
+        return Ok(h);
+    }
     if skip {
         return Ok(handle(0, 0, true));
     }
@@ -2172,7 +2446,29 @@ pub(crate) fn open(
         Ok(reply) => {
             let mut f = Fields::new(&reply);
             let (fh, open_flags) = (f.u64()?, f.u32()?);
-            Ok(handle(fh, open_flags, false))
+            let mut handle = handle(fh, open_flags, false);
+            if !dir
+                && sent & oflags::O_ACCMODE == oflags::O_RDONLY
+                && fh & APPINE_BACKING_HANDLE != 0
+            {
+                let backing = conn.borrow().backing.clone();
+                if let Some(mount) = backing.filter(|m| m.active.load(Ordering::Acquire)) {
+                    let remote = fh & !APPINE_BACKING_HANDLE;
+                    if let Some(file) = cx.unlocked(|| mount.provider.duplicate(remote))
+                        && mount.active.load(Ordering::Acquire)
+                    {
+                        if mount.provider.supports_metadata() {
+                            handle.open_flags |= fopen::NOFLUSH;
+                        }
+                        handle.backing = Some(std::sync::Arc::new(BackedFile {
+                            mount,
+                            file,
+                            ticket: None,
+                        }));
+                    }
+                }
+            }
+            Ok(handle)
         }
         // A daemon without them needs no open, whatever INIT said (6.1's fuse_file_open)
         Err(Errno::ENOSYS) => Ok(handle(0, 0, true)),
@@ -2277,27 +2573,39 @@ pub(crate) fn readdir(
         if reply.is_empty() {
             return Ok(out);
         }
-        let mut at = 0;
-        // struct fuse_dirent: ino, off, namelen, type, name padded to 8 bytes
-        while reply.len() - at >= 24 {
-            let mut f = Fields::new(&reply[at..]);
-            let (ino, off, namelen, ty) = (f.u64()?, f.u64()?, f.u32()? as usize, f.u32()?);
-            if namelen == 0 || namelen > NAME_MAX {
-                return Err(Errno::EIO);
-            }
-            let name = f.rest().get(..namelen).ok_or(Errno::EIO)?;
-            if name.contains(&b'/') {
-                return Err(Errno::EIO);
-            }
-            out.push(super::store::DirEntry {
-                name: name.to_vec(),
-                ino,
-                mode: (ty & 0xf) << 12,
-            });
-            offset = off;
-            at += (24 + namelen).next_multiple_of(8);
+        offset = parse_dirents(&reply, &mut out)?;
+    }
+}
+
+fn parse_dirents(reply: &[u8], out: &mut Vec<super::store::DirEntry>) -> Result<u64, Errno> {
+    let mut at = 0;
+    let mut offset = 0;
+    // struct fuse_dirent: ino, off, namelen, type, name padded to 8 bytes.
+    while reply.len() - at >= 24 {
+        let mut f = Fields::new(&reply[at..]);
+        let (ino, off, namelen, ty) = (f.u64()?, f.u64()?, f.u32()? as usize, f.u32()?);
+        if namelen == 0 || namelen > NAME_MAX {
+            return Err(Errno::EIO);
+        }
+        let name = f.rest().get(..namelen).ok_or(Errno::EIO)?;
+        if name.contains(&b'/') {
+            return Err(Errno::EIO);
+        }
+        out.push(super::store::DirEntry {
+            name: name.to_vec(),
+            ino,
+            mode: (ty & 0xf) << 12,
+        });
+        offset = off;
+        at += (24 + namelen).next_multiple_of(8);
+        if at > reply.len() {
+            return Err(Errno::EIO);
         }
     }
+    if at != reply.len() {
+        return Err(Errno::EIO);
+    }
+    Ok(offset)
 }
 
 /// What `FUSE_STATFS` reports (`struct fuse_kstatfs`).
@@ -2393,17 +2701,37 @@ pub(crate) fn lock_owner(table: usize) -> u64 {
     (v ^ (v >> 29)).wrapping_mul(0x9e37_79b9_7f4a_7c15)
 }
 
+/// Reads a mapping window from its host descriptor when present, with the original FUSE read
+/// as a fallback. Revocation and connection abort still deny the access.
+pub(crate) fn read_mapping(
+    cx: &mut Cx<'_>,
+    h: (&Rc<RefCell<Conn>>, u64, u64, u32),
+    backing: Option<&BackedFile>,
+    offset: u64,
+    len: usize,
+) -> Result<Vec<u8>, Errno> {
+    if let Some(backing) = backing {
+        let mut bytes = vec![0; len];
+        if let Some(result) = backing.try_read_at(cx, h.0, &mut bytes, offset, true) {
+            bytes.truncate(result?);
+            return Ok(bytes);
+        }
+    }
+    read(cx, h, offset, len)
+}
+
 /// A FUSE file's data copied into a new host file, for a mapping of it (there being no page
 /// cache to map): `len` bytes from `offset`, read through open handle `h`. The host file is as
 /// long as the FUSE file reached, so a mapping past its end faults as on Linux.
-pub(crate) fn snapshot(
-    cx: &mut Cx<'_>,
-    h: (&Rc<RefCell<Conn>>, u64, u64, u32),
-    offset: u64,
-    len: u64,
-) -> Result<std::fs::File, Errno> {
+fn snapshot(cx: &mut Cx<'_>, h: &Handle, offset: u64, len: u64) -> Result<std::fs::File, Errno> {
     use std::os::unix::fs::FileExt;
-    let data = read(cx, h, offset, len as usize)?;
+    let data = read_mapping(
+        cx,
+        (&h.conn, h.nodeid, h.fh, h.flags),
+        h.backing.as_deref(),
+        offset,
+        len as usize,
+    )?;
     let file = appine_hal::memfd(c"appine-fuse").map_err(Errno)?;
     file.set_len(offset + data.len() as u64)
         .map_err(|e| Errno(e.raw_os_error().unwrap_or(Errno::EIO.0)))?;
@@ -2418,6 +2746,29 @@ mod tests {
 
     fn conn(opts: Options) -> Conn {
         Conn::new(0x30, opts, &Cred::root(), crate::pidns::PidNs::init())
+    }
+
+    #[test]
+    fn allow_other_compares_user_namespace_identity() {
+        let mounter = Cred::root();
+        let mut peer = Cred::root();
+        let opts = Options {
+            allow_other: true,
+            ..Options::default()
+        };
+        let mount = Conn::new(0x30, opts.clone(), &mounter, crate::pidns::PidNs::init());
+
+        // Independently launched processes hold separate copies of the initial namespace.
+        assert!(!Rc::ptr_eq(&mounter.user_ns, &peer.user_ns));
+        assert!(mount.allows(&peer));
+
+        let child = UserNs::child(&peer.user_ns, 0, true);
+        peer.user_ns = child.clone();
+        assert!(mount.allows(&peer));
+
+        let child_mount = Conn::new(0x30, opts, &peer, crate::pidns::PidNs::init());
+        peer.user_ns = UserNs::child(&mounter.user_ns, 0, true);
+        assert!(!child_mount.allows(&peer));
     }
 
     /// A `struct fuse_attr` with mode `mode` and owner `uid`.
@@ -2454,6 +2805,8 @@ mod tests {
             flags: 0,
             dir: false,
             no_release: false,
+            backing: None,
+            directory_snapshot: None,
         }
         .counted();
         let releases = |c: &Rc<RefCell<Conn>>| {
@@ -2662,6 +3015,8 @@ mod tests {
             flags: 0,
             dir: false,
             no_release: true,
+            backing: None,
+            directory_snapshot: None,
         }
         .counted();
         c.borrow_mut()

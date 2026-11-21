@@ -6379,7 +6379,10 @@ mod tests {
     #[test]
     fn fill_reads_ahead_after_pages_read() {
         let host = appine_hal::memfd(c"appine-mm-fill").unwrap();
-        let source = crate::fd::OpenFile::new(crate::fd::FileKind::Host(-1), 0);
+        let source = crate::fd::OpenFile::new(
+            crate::fd::FileKind::Host(crate::fd::HostFd::Inherited(-1)),
+            0,
+        );
         let f = Fill::new(host, 2048 * PAGE_SIZE, source);
         let window = |page: u64| {
             let (off, len) = f.window(page).unwrap();
@@ -6404,7 +6407,10 @@ mod tests {
         let size = 100 * PAGE_SIZE + 100;
         let host = appine_hal::memfd(c"appine-mm-fill").unwrap();
         host.set_len(size).unwrap();
-        let source = crate::fd::OpenFile::new(crate::fd::FileKind::Host(-1), 0);
+        let source = crate::fd::OpenFile::new(
+            crate::fd::FileKind::Host(crate::fd::HostFd::Inherited(-1)),
+            0,
+        );
         let fill = Fill::new(host, size, source);
         // The daemon's part: file page p holds p + 1
         let read = |f: &Fill, page: u64| {

@@ -5,7 +5,7 @@
 >
 > Verified: 2026-11-12 (split out of the kernel/vfs full mapping of 2026-11-12; the boundary was checked against the source at the split)
 >
-> Maintained: 2026-11-14 (targeted verification only since the full mapping; latest change: cgroup and device BPF references follow the split into kernel/cgroup)
+> Maintained: 2026-11-19 (targeted verification only since the full mapping; latest change: fetch stat information for backed root-share files by open handle)
 
 ## Responsibilities
 
@@ -52,6 +52,8 @@ pipes, FIFOs and splice (`kernel/pipe`); FUSE opens and I/O (`kernel/fuse`); sto
   directory is a Directory with the daemon's handle). Regular carries `cow`: writable, but the
   handle only reads because the file shares its object, so its first change gives the file an
   object of its own; set at open, by `rehome` and by `follow_copy_up`, cleared by `rehome`.
+- HostFd stores either an inherited raw descriptor or an owned descriptor closed when its last
+  reference is dropped.
 - `ProcEvent` — change counters given at open to mounts, mountinfo, cgroup2 and sysfs files.
 - `IoPath` — the route of one I/O call, chosen so no borrow of the open file is held during I/O
   (`Local`: regular files through `unlocked_io`; other local files, and `O_APPEND` writes to
@@ -157,6 +159,8 @@ pipes, FIFOs and splice (`kernel/pipe`); FUSE opens and I/O (`kernel/fuse`); sto
   on the shared object, marked `cow`. Then by type: regular files open the host object, character
   devices by device number (Character devices below), block devices as loop devices (major 7,
   `kernel/loop`; others `ENXIO`), FIFOs the shared pipe (access mode 3 `EINVAL`), sockets `ENXIO`.
+- Backed root-share descriptors use their open handle for descriptor stat. Pathname stat
+  continues to use node attributes.
 - FUSE nodes are opened and created by `kernel/fuse` (the daemon's open and create); a file
   created that way is not checked again.
 - Pseudo nodes: nsfs writes `EPERM` first; permission from the synthetic stat, except `/proc/sys`

@@ -958,9 +958,10 @@ mod tests {
         let mut c = Channel::default();
         c.push(packet(b"ab", 1));
         let mut with_fd = packet(b"cd", 1);
-        with_fd
-            .fds
-            .push(OpenFile::new(FileKind::Host(1), oflags::O_WRONLY));
+        with_fd.fds.push(OpenFile::new(
+            FileKind::Host(crate::fd::HostFd::Inherited(1)),
+            oflags::O_WRONLY,
+        ));
         c.push(with_fd);
         c.push(packet(b"ef", 1));
         c.push(packet(b"gh", 2));

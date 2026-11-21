@@ -2,24 +2,36 @@ package io.github.mthli.appine
 
 import android.app.Dialog
 import android.content.ActivityNotFoundException
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.DialogInterface
 import android.content.Intent
 import android.content.ServiceConnection
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
+import android.provider.DocumentsContract
+import android.view.LayoutInflater
 import android.view.View
+import android.widget.EditText
+import android.widget.ImageButton
+import android.widget.LinearLayout
+import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.browser.customtabs.CustomTabsIntent
 import androidx.core.net.toUri
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.isVisible
 import androidx.core.view.updatePadding
+import androidx.core.widget.doAfterTextChanged
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.preference.ListPreference
@@ -34,6 +46,9 @@ import com.google.android.material.appbar.AppBarLayout
 import com.google.android.material.appbar.MaterialToolbar
 import com.google.android.material.color.DynamicColors
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import com.google.android.material.materialswitch.MaterialSwitch
+import com.google.android.material.textfield.TextInputEditText
+import com.google.android.material.textfield.TextInputLayout
 import java.io.File
 import java.io.IOException
 import kotlin.concurrent.thread
@@ -120,6 +135,28 @@ class SettingsFragment : PreferenceFragmentCompat(), TerminalService.Listener {
     }
     private lateinit var runPolicy: ListPreference
     private lateinit var fileAccess: SwitchPreferenceCompat
+    private lateinit var androidShare: Preference
+    private lateinit var commandAccess: SwitchPreferenceCompat
+    private lateinit var commandClient: Preference
+    private var checkingCommandClientModule = false
+    private var shareListDialog: AlertDialog? = null
+    private var shareListRows: List<AndroidShare.Config> = emptyList()
+    private var pendingEditTarget: String? = null
+    private var folderRequest = 0
+    private val pickSharedFolder = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        val editingTarget = pendingEditTarget
+        pendingEditTarget = null
+        if (uri != null) {
+            Privacy.deferNextUnlock(requireActivity())
+            confirmShare(
+                source = AndroidShare.Source.Tree(uri),
+                previousTarget = editingTarget,
+                previousSource = editingTarget?.let { target ->
+                    Settings.androidShares(requireContext()).firstOrNull { it.target == target }?.source
+                },
+            )
+        }
+    }
     private lateinit var privacy: SwitchPreferenceCompat
     private lateinit var fillWide: SwitchPreferenceCompat
     private lateinit var cursorStyle: ListPreference
@@ -145,6 +182,7 @@ class SettingsFragment : PreferenceFragmentCompat(), TerminalService.Listener {
     }
 
     override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
+        pendingEditTarget = savedInstanceState?.getString(STATE_PENDING_EDIT_TARGET)
         preferenceScreen = preferenceManager.createPreferenceScreen(requireContext())
         distro = action(R.string.settings_distro) { onDistro() }
         reset = action(R.string.settings_reset) { onReset() }
@@ -186,6 +224,9 @@ class SettingsFragment : PreferenceFragmentCompat(), TerminalService.Listener {
                 false
             }
         }
+        androidShare = action(R.string.share_title) { chooseAndroidShare() }
+        commandAccess = toggle(R.string.command_access, TerminalService::setCommandAccess)
+        commandClient = action(R.string.command_client_title) { chooseCommandClient() }
         privacy = SwitchPreferenceCompat(requireContext()).configure(R.string.settings_privacy).apply {
             widgetLayoutResource = R.layout.preference_switch
             setOnPreferenceChangeListener { _, value ->
@@ -214,7 +255,7 @@ class SettingsFragment : PreferenceFragmentCompat(), TerminalService.Listener {
         }
 
         group(R.string.settings_group_system, distro, account, reset)
-        group(R.string.settings_group_android, notifications, batteryUsage, runPolicy, privacy, fileAccess)
+        group(R.string.settings_group_android, notifications, batteryUsage, runPolicy, privacy, fileAccess, androidShare, commandAccess, commandClient)
         group(R.string.settings_group_terminal, fillWide, cursorStyle, cursorBlink, tabList, volumeKeys)
         group(R.string.settings_group_debug, tier, export)
         group(R.string.settings_group_about, telegram, project, privacyPolicy, licenses, version)
@@ -277,6 +318,11 @@ class SettingsFragment : PreferenceFragmentCompat(), TerminalService.Listener {
             .showPrivate()
     }
 
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putString(STATE_PENDING_EDIT_TARGET, pendingEditTarget)
+    }
+
     override fun onStop() {
         exportGeneration++
         service?.removeListener(this)
@@ -285,6 +331,12 @@ class SettingsFragment : PreferenceFragmentCompat(), TerminalService.Listener {
         accountLoad++
         render()
         super.onStop()
+    }
+
+    override fun onDestroy() {
+        shareListDialog?.dismiss()
+        shareListDialog = null
+        super.onDestroy()
     }
 
     /** Never queue an export behind the service worker: the kernel may be stuck on its lock. */
@@ -488,7 +540,7 @@ class SettingsFragment : PreferenceFragmentCompat(), TerminalService.Listener {
     private fun render() {
         val s = service
         if (s == null) {
-            for (row in listOf(distro, reset, account, tier, runPolicy, fileAccess, privacy,
+            for (row in listOf(distro, reset, account, tier, runPolicy, fileAccess, privacy, androidShare, commandAccess, commandClient,
                 fillWide, cursorStyle, cursorBlink, volumeKeys, tabList)) row.isEnabled = false
             return
         }
@@ -519,6 +571,26 @@ class SettingsFragment : PreferenceFragmentCompat(), TerminalService.Listener {
         val privacyEnabled = Settings.privacyMode(requireContext())
         privacy.set(getString(R.string.privacy_summary), true, privacyEnabled)
         fileAccess.set(getString(if (privacyEnabled) R.string.privacy_file_access else R.string.file_access_summary), !privacyEnabled, s.fileAccess)
+        commandAccess.set(
+            getString(if (privacyEnabled) R.string.command_access_paused else R.string.command_access_summary),
+            !privacyEnabled, Settings.terminalAccessEnabled(requireContext()),
+        )
+        commandClient.set(
+            getString(when {
+                privacyEnabled -> R.string.command_access_paused
+                TerminalClient.isModifying -> R.string.command_client_working
+                else -> R.string.command_client_summary
+            }),
+            !privacyEnabled && !TerminalClient.isModifying && !checkingCommandClientModule,
+        )
+        val shares = Settings.androidShares(requireContext())
+        val shareSummary = if (shares.isEmpty()) {
+            getString(R.string.share_off)
+        } else {
+            resources.getQuantityString(R.plurals.share_count, shares.size, shares.size)
+        }
+        androidShare.set(shareSummary, idle)
+        refreshShareListDialog()
         fillWide.set(getString(if (s.fillWide) R.string.fill_wide_on else R.string.fill_wide_off), true, s.fillWide)
         cursorStyle.value = s.cursorStyle.toString()
         cursorStyle.set(getString(CURSOR_LABELS[CURSOR_STYLES.indexOf(s.cursorStyle).coerceAtLeast(0)]), true)
@@ -641,6 +713,446 @@ class SettingsFragment : PreferenceFragmentCompat(), TerminalService.Listener {
             .showPrivate()
     }
 
+    private fun chooseCommandClient() {
+        val activity = requireActivity()
+        val context = activity.applicationContext
+        if (Settings.privacyMode(context) || TerminalClient.isModifying || checkingCommandClientModule) return
+        checkingCommandClientModule = true
+        commandClient.isEnabled = false
+        thread(name = "appine-cli-status") {
+            val state = TerminalClient.moduleState(context)
+            activity.runOnUiThread {
+                checkingCommandClientModule = false
+                if (isAdded) render()
+                if (isResumed && !Settings.privacyMode(context)) showCommandClient(state)
+            }
+        }
+    }
+
+    private fun showCommandClient(state: TerminalClient.ModuleState) {
+        val dialog = MaterialAlertDialogBuilder(requireContext())
+            .setTitle(R.string.command_client_title)
+            .setNegativeButton(android.R.string.cancel, null)
+        if (state == TerminalClient.ModuleState.REMOVAL_PENDING) {
+            dialog.setMessage(R.string.command_client_removal_pending)
+                .setPositiveButton(R.string.command_client_copy_shell) { _, _ -> copyCommandClientShell() }
+                .showPrivate()
+            return
+        }
+        val installed = state == TerminalClient.ModuleState.INSTALLED
+        val choices = arrayOf(
+            getString(if (installed) R.string.command_client_uninstall else R.string.command_client_install),
+            getString(R.string.command_client_copy_shell),
+        )
+        dialog.setItems(choices) { _, which ->
+            when {
+                which == 1 -> copyCommandClientShell()
+                installed -> confirmCommandClientUninstall()
+                else -> changeCommandClientModule(uninstall = false)
+            }
+        }.showPrivate()
+    }
+
+    private fun confirmCommandClientUninstall() {
+        MaterialAlertDialogBuilder(requireContext())
+            .setTitle(R.string.command_client_uninstall)
+            .setMessage(R.string.command_client_confirm_uninstall)
+            .setNegativeButton(android.R.string.cancel, null)
+            .setPositiveButton(R.string.command_client_uninstall) { _, _ -> changeCommandClientModule(uninstall = true) }
+            .showPrivate()
+    }
+
+    private fun changeCommandClientModule(uninstall: Boolean) {
+        val activity = requireActivity()
+        val context = activity.applicationContext
+        if (Settings.privacyMode(context) || TerminalClient.isModifying) return
+        commandClient.set(getString(R.string.command_client_working), false)
+        thread(name = "appine-cli-module") {
+            val result = if (uninstall) TerminalClient.uninstall(context) else TerminalClient.install(context)
+            activity.runOnUiThread {
+                if (result.installed) {
+                    val runtime = GuestCommands.service
+                    if (runtime == null || Settings.privacyMode(context)) {
+                        Settings.setTerminalAccess(context, true)
+                    } else {
+                        runtime.setCommandAccess(true)
+                    }
+                }
+                if (isAdded) render()
+                if (!isResumed || Settings.privacyMode(context)) return@runOnUiThread
+                when (result) {
+                    TerminalClient.Result.KSU_INSTALLED -> MaterialAlertDialogBuilder(requireContext())
+                        .setTitle(R.string.command_client_installed_title)
+                        .setMessage(result.message)
+                        .setPositiveButton(android.R.string.ok, null)
+                        .showPrivate()
+                    TerminalClient.Result.ALREADY_INSTALLED -> showCommandClient(TerminalClient.ModuleState.INSTALLED)
+                    else -> Toast.makeText(context, result.message, Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+
+    private fun copyCommandClientShell() {
+        val s = service ?: return
+        val context = requireContext()
+        if (Settings.privacyMode(context)) return
+        val command = TerminalClient.interactiveCommand(context)
+        if (command == null) {
+            Toast.makeText(context, R.string.command_client_unavailable, Toast.LENGTH_SHORT).show()
+            return
+        }
+        context.getSystemService(ClipboardManager::class.java)
+            .setPrimaryClip(ClipData.newPlainText(getString(R.string.command_client_copy_shell), command))
+        s.setCommandAccess(true)
+        Toast.makeText(context, R.string.command_client_copied, Toast.LENGTH_SHORT).show()
+    }
+
+    private fun chooseAndroidShare() {
+        val existing = shareListDialog
+        if (existing != null && existing.isShowing) {
+            refreshShareListDialog()
+            return
+        }
+        val dialog = MaterialAlertDialogBuilder(requireContext(), R.style.ThemeOverlay_Appine_FolderShareDialog)
+            .setTitle(R.string.share_title)
+            .setView(R.layout.share_list_dialog)
+            .setPositiveButton(R.string.share_add, null)
+            .setNegativeButton(android.R.string.cancel, null)
+            .showPrivate()
+        shareListDialog = dialog
+        dialog.setOnDismissListener {
+            if (shareListDialog === dialog) {
+                shareListDialog = null
+                shareListRows = emptyList()
+            }
+        }
+        dialog.getButton(DialogInterface.BUTTON_POSITIVE).setOnClickListener {
+            openFolderPicker(editingTarget = null, editingSource = null)
+        }
+        refreshShareListDialog()
+    }
+
+    private fun refreshShareListDialog() {
+        val dialog = shareListDialog ?: return
+        if (!dialog.isShowing || !isAdded) return
+        val context = requireContext()
+        val shares = Settings.androidShares(context)
+        val statuses = service?.androidShareStatuses.orEmpty()
+        val emptyView = dialog.findViewById<TextView>(R.id.share_list_empty) ?: return
+        val container = dialog.findViewById<LinearLayout>(R.id.share_list_container) ?: return
+        emptyView.isVisible = shares.isEmpty()
+        container.isVisible = shares.isNotEmpty()
+        if (shareListRows != shares) {
+            shareListRows = shares
+            container.removeAllViews()
+            val inflater = LayoutInflater.from(dialog.context)
+            for (config in shares) {
+                val row = inflater.inflate(R.layout.share_list_item, container, false)
+                row.findViewById<TextView>(R.id.share_item_mode).setText(shareModeLabel(config.source))
+                row.findViewById<TextView>(R.id.share_item_target).text = config.target
+                bindShareSourceName(row.findViewById(R.id.share_item_folder), config.source) {
+                    dialog.isShowing && row.isAttachedToWindow
+                }
+                row.setOnClickListener { manageAndroidShare(config) }
+                container.addView(row)
+            }
+        }
+        shares.forEachIndexed { index, config ->
+            val status = statuses[config.target] ?: AndroidShare.Status.OFF
+            setShareStatus(container.getChildAt(index).findViewById(R.id.share_item_status), status)
+        }
+    }
+
+    private fun manageAndroidShare(config: AndroidShare.Config) {
+        val context = requireContext()
+        val status = service?.androidShareStatuses?.get(config.target) ?: AndroidShare.Status.OFF
+        val mounted = status == AndroidShare.Status.MOUNTED
+        val dialog = MaterialAlertDialogBuilder(context, R.style.ThemeOverlay_Appine_FolderShareDialog)
+            .setTitle(R.string.share_title)
+            .setView(R.layout.share_manage_dialog)
+            .setPositiveButton(R.string.share_edit) { _, _ ->
+                confirmShare(
+                    source = config.source,
+                    previousTarget = config.target,
+                    previousSource = config.source,
+                )
+            }
+            .setNeutralButton(R.string.share_disconnect) { _, _ ->
+                service?.removeAndroidShare(config.target)
+            }
+            .showPrivate()
+
+        val folderView = dialog.requireViewById<TextView>(R.id.share_android_folder)
+        dialog.requireViewById<TextView>(R.id.share_access_mode).setText(shareModeLabel(config.source))
+        dialog.requireViewById<View>(R.id.share_change_folder).setOnClickListener {
+            dialog.dismiss()
+            openFolderPicker(editingTarget = config.target, editingSource = config.source)
+        }
+        bindShareSourceName(folderView, config.source) { dialog.isShowing }
+        dialog.requireViewById<TextView>(R.id.share_linux_path).text = config.target
+        val copyButton = dialog.requireViewById<ImageButton>(R.id.share_copy_path)
+        copyButton.isVisible = mounted
+        copyButton.setOnClickListener {
+            if (Privacy.locked(context)) return@setOnClickListener
+            val clipboard = context.getSystemService(ClipboardManager::class.java)
+                ?: return@setOnClickListener
+            clipboard.setPrimaryClip(ClipData.newPlainText(getString(R.string.share_mount_point), config.target))
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+                Toast.makeText(context, R.string.share_path_copied, Toast.LENGTH_SHORT).show()
+            }
+        }
+        setShareStatus(dialog.requireViewById(R.id.share_status), status)
+    }
+
+    private fun shareModeLabel(source: AndroidShare.Source): Int =
+        if (source is AndroidShare.Source.Root && source.write) R.string.share_mode_read_write else R.string.share_mode_read_only
+
+    private fun setShareStatus(view: TextView, status: AndroidShare.Status) {
+        val label = when (status) {
+            AndroidShare.Status.OFF -> R.string.share_off
+            AndroidShare.Status.STARTING -> R.string.share_starting
+            AndroidShare.Status.MOUNTED -> null
+            AndroidShare.Status.ROOT_FAILED -> R.string.share_root_failed
+            AndroidShare.Status.TREE_FAILED -> R.string.share_tree_failed
+            AndroidShare.Status.MOUNT_FAILED -> R.string.share_mount_failed
+        }
+        view.isVisible = label != null
+        if (label == null) return
+        view.setText(label)
+        val color = if (status.isFailure()) androidx.appcompat.R.attr.colorError
+            else com.google.android.material.R.attr.colorOnSurfaceVariant
+        view.setTextColor(view.context.themeColor(color))
+    }
+
+    private fun AndroidShare.Status.isFailure(): Boolean = when (this) {
+        AndroidShare.Status.ROOT_FAILED,
+        AndroidShare.Status.TREE_FAILED,
+        AndroidShare.Status.MOUNT_FAILED -> true
+        AndroidShare.Status.OFF,
+        AndroidShare.Status.STARTING,
+        AndroidShare.Status.MOUNTED -> false
+    }
+
+    private fun bindShareSourceName(
+        view: TextView,
+        source: AndroidShare.Source,
+        rootFullPath: Boolean = false,
+        isActive: () -> Boolean,
+    ) {
+        when (source) {
+            is AndroidShare.Source.Root -> {
+                view.tag = null
+                view.text = if (rootFullPath) source.path else File(source.path).name.ifEmpty { "/" }
+            }
+            is AndroidShare.Source.Tree -> {
+                val uri = source.uri
+                view.tag = uri
+                view.setText(R.string.share_android_folder_unknown)
+                val appContext = requireContext().applicationContext
+                val activity = requireActivity()
+                thread(isDaemon = true, name = "appine-share-label") {
+                    val name = resolveTreeDisplayName(appContext, uri)
+                    activity.runOnUiThread {
+                        if (isAdded && isActive() && view.tag == uri && !Privacy.locked(appContext)) {
+                            view.text = name ?: getString(R.string.share_android_folder_unknown)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun resolveTreeDisplayName(context: Context, treeUri: Uri): String? =
+        try {
+            val documentUri = DocumentsContract.buildDocumentUriUsingTree(
+                treeUri,
+                DocumentsContract.getTreeDocumentId(treeUri)
+            )
+            context.contentResolver.query(
+                documentUri,
+                arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME),
+                null,
+                null,
+                null
+            )?.use { cursor ->
+                if (cursor.moveToFirst()) cursor.getString(0)?.takeIf { it.isNotBlank() } else null
+            }
+        } catch (_: Exception) {
+            null
+        }
+
+    private fun openFolderPicker(
+        editingTarget: String? = null,
+        editingSource: AndroidShare.Source? = null,
+    ) {
+        val context = requireContext().applicationContext
+        val activity = requireActivity()
+        val preferred = (editingSource as? AndroidShare.Source.Root)?.path ?: "/data/media/0"
+        val request = ++folderRequest
+        thread(isDaemon = true, name = "appine-folder-picker") {
+            val root = AndroidShare.rootDirectories(context, "/")
+            val folders = if (root != null && preferred != "/") AndroidShare.rootDirectories(context, preferred) else null
+            activity.runOnUiThread {
+                if (!pickerActive(request)) return@runOnUiThread
+                when {
+                    folders != null -> showRootFolders(preferred, folders, editingTarget, editingSource)
+                    root != null -> showRootFolders("/", root, editingTarget, editingSource)
+                    else -> {
+                        pendingEditTarget = editingTarget
+                        try {
+                            pickSharedFolder.launch(null)
+                        } catch (_: ActivityNotFoundException) {
+                            pendingEditTarget = null
+                            Toast.makeText(requireContext(), R.string.share_tree_failed, Toast.LENGTH_LONG).show()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun pickerActive(request: Int): Boolean =
+        request == folderRequest && isAdded &&
+            lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED) &&
+            !Privacy.locked(requireContext())
+
+    private fun browseRootFolder(
+        path: String,
+        editingTarget: String?,
+        editingSource: AndroidShare.Source?,
+    ) {
+        val context = requireContext().applicationContext
+        val activity = requireActivity()
+        val request = ++folderRequest
+        thread(isDaemon = true, name = "appine-folder-picker") {
+            val folders = AndroidShare.rootDirectories(context, path)
+            activity.runOnUiThread {
+                if (!pickerActive(request)) return@runOnUiThread
+                if (folders != null) showRootFolders(path, folders, editingTarget, editingSource) else {
+                    MaterialAlertDialogBuilder(requireContext())
+                        .setMessage(R.string.share_folder_read_failed)
+                        .setPositiveButton(R.string.share_pick) { _, _ -> openFolderPicker(editingTarget, editingSource) }
+                        .setNegativeButton(android.R.string.cancel, null)
+                        .showPrivate()
+                }
+            }
+        }
+    }
+
+    private fun showRootFolders(
+        path: String,
+        folders: List<String>,
+        editingTarget: String?,
+        editingSource: AndroidShare.Source?,
+    ) {
+        val parent = File(path).parent
+        val labels = (if (parent != null) listOf(getString(R.string.share_parent)) else emptyList()) + folders
+        val paths = listOfNotNull(parent) + folders.map { File(path, it).path }
+        MaterialAlertDialogBuilder(requireContext())
+            .setTitle(path)
+            .setItems(labels.toTypedArray()) { _, index -> browseRootFolder(paths[index], editingTarget, editingSource) }
+            .setNeutralButton(R.string.share_root) { _, _ -> chooseRootPath(path, editingTarget, editingSource) }
+            .setPositiveButton(R.string.share_mount) { _, _ ->
+                confirmShare(
+                    source = AndroidShare.Source.Root(path, write = false),
+                    previousTarget = editingTarget,
+                    previousSource = editingSource,
+                )
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .showPrivate()
+    }
+
+    private fun chooseRootPath(
+        current: String,
+        editingTarget: String?,
+        editingSource: AndroidShare.Source?,
+    ) {
+        val context = requireContext()
+        val path = EditText(context).apply {
+            setSingleLine()
+            setText(current)
+        }
+        val dialog = MaterialAlertDialogBuilder(context)
+            .setTitle(R.string.share_root)
+            .setView(path)
+            .setPositiveButton(android.R.string.ok, null)
+            .setNegativeButton(android.R.string.cancel, null)
+            .showPrivate()
+        dialog.getButton(DialogInterface.BUTTON_POSITIVE).setOnClickListener {
+            val selected = path.text.toString()
+            if (AndroidShare.validRoot(selected)) {
+                dialog.dismiss()
+                browseRootFolder(File(selected).path, editingTarget, editingSource)
+            } else {
+                path.error = getString(R.string.share_invalid_path)
+            }
+        }
+    }
+
+    private fun confirmShare(
+        source: AndroidShare.Source,
+        previousTarget: String?,
+        previousSource: AndroidShare.Source?,
+    ) {
+        val context = requireContext()
+        val dialog = MaterialAlertDialogBuilder(context, R.style.ThemeOverlay_Appine_FolderShareDialog)
+            .setTitle(R.string.share_confirm)
+            .setView(R.layout.share_root_confirmation)
+            .setNegativeButton(android.R.string.cancel, null)
+            .setPositiveButton(if (previousTarget == null) R.string.share_mount else R.string.share_save, null)
+            .showPrivate()
+
+        val selectedPathView = dialog.requireViewById<TextView>(R.id.share_selected_path)
+        bindShareSourceName(selectedPathView, source, rootFullPath = true) { dialog.isShowing }
+
+        val targetLayout = dialog.requireViewById<TextInputLayout>(R.id.share_target_layout)
+        val targetInput = dialog.requireViewById<TextInputEditText>(R.id.share_target_input)
+        targetLayout.placeholderText = AndroidShare.DEFAULT_TARGET
+        if (previousTarget == null) {
+            targetLayout.helperText = getString(R.string.share_target_helper, AndroidShare.DEFAULT_TARGET)
+            targetInput.setText("")
+        } else {
+            targetLayout.helperText = null
+            targetInput.setText(previousTarget)
+            targetInput.setSelection(previousTarget.length)
+        }
+        targetInput.doAfterTextChanged {
+            targetLayout.error = null
+        }
+
+        val writable = dialog.requireViewById<MaterialSwitch>(R.id.share_write_switch)
+        val summary = dialog.requireViewById<TextView>(R.id.share_access_summary)
+        if (source is AndroidShare.Source.Root) {
+            writable.isVisible = true
+            val keepPriorWrite = previousSource is AndroidShare.Source.Root && previousSource.path == source.path
+            writable.isChecked = keepPriorWrite && previousSource.write
+            summary.isVisible = writable.isChecked
+            writable.setOnCheckedChangeListener { _, enabled ->
+                summary.isVisible = enabled
+            }
+        } else {
+            writable.isVisible = false
+            writable.isChecked = false
+            summary.isVisible = false
+        }
+
+        dialog.getButton(DialogInterface.BUTTON_POSITIVE).setOnClickListener {
+            val s = service ?: return@setOnClickListener
+            val finalSource = when (source) {
+                is AndroidShare.Source.Root -> AndroidShare.Source.Root(source.path, writable.isChecked)
+                is AndroidShare.Source.Tree -> source
+            }
+            val errorRes = s.saveAndroidShare(previousTarget, finalSource, targetInput.text?.toString().orEmpty())
+            if (errorRes != null) {
+                targetLayout.error = getString(errorRes)
+            } else {
+                dialog.dismiss()
+            }
+        }
+    }
+
     private fun onTier() {
         val s = service ?: return
         val tiers = intArrayOf(1, 0)
@@ -680,6 +1192,7 @@ class SettingsFragment : PreferenceFragmentCompat(), TerminalService.Listener {
         private const val PROJECT_URL = "https://github.com/mthli/appine"
         private const val PRIVACY_POLICY_URL = "https://appine.sh/privacy"
         private const val CHOICE_DIALOG = "settings.choice"
+        private const val STATE_PENDING_EDIT_TARGET = "settings.share.pendingEditTarget"
 
         /** The cursor shapes offered, in order, and their names. */
         private val CURSOR_STYLES = intArrayOf(VtNative.CURSOR_BLOCK, VtNative.CURSOR_BAR, VtNative.CURSOR_UNDERLINE)

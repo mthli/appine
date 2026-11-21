@@ -291,4 +291,65 @@
     <string name="copy_report">レポートをコピー</string>
     <string name="report_copied">レポートをコピーしました</string>
 
+
+    <!-- Android directory mount -->
+    <string name="share_title">フォルダ共有</string>
+    <string name="share_off">未共有</string>
+    <string name="share_starting">共有を開始しています…</string>
+    <string name="share_android_folder">端末のフォルダ</string>
+    <string name="share_android_folder_unknown">選択したフォルダ</string>
+    <string name="share_mode_read_only">読み取り専用</string>
+    <string name="share_mode_read_write">読み書き</string>
+    <string name="share_mount_point">マウントポイント</string>
+    <string name="share_copy_path">パスをコピー</string>
+    <string name="share_path_copied">パスをコピーしました</string>
+    <string name="share_root_failed">Android パスを開けません。パスを確認し、root を許可してください。</string>
+    <string name="share_tree_failed">選択したフォルダを読み取れません。選び直してお試しください。</string>
+    <string name="share_mount_failed">フォルダを共有できません。選び直してください。</string>
+    <string name="share_pick">フォルダを選択</string>
+    <string name="share_change">フォルダを変更</string>
+    <string name="share_root">パスを入力</string>
+    <string name="share_confirm">フォルダを共有</string>
+    <string name="share_access_write">Linux でファイルの作成、変更、削除ができます</string>
+    <string name="share_disconnect">共有を停止</string>
+    <string name="share_writable">元のファイルの変更を許可</string>
+    <string name="share_mount">共有する</string>
+    <string name="share_invalid_path">Android の絶対パスを入力してください</string>
+    <string name="share_parent">親フォルダ</string>
+    <string name="share_folder_read_failed">このフォルダを開けません。</string>
+    <plurals name="share_count">
+        <item quantity="other">%d 個のフォルダ</item>
+    </plurals>
+    <string name="share_add">フォルダを追加</string>
+    <string name="share_edit">編集</string>
+    <string name="share_save">保存</string>
+    <string name="share_target_helper">空欄の場合は %1$s を使用します</string>
+    <string name="share_invalid_target">絶対パスを入力してください</string>
+    <string name="share_target_conflict">他のマウントポイントと重複しています</string>
+    <string name="command_access">ターミナル接続</string>
+    <string name="command_access_summary">この端末のアプリが Appine で Linux コマンドを実行できるようにする</string>
+    <string name="command_client_copy_shell">シェルを開くコマンドをコピー</string>
+    <string name="command_client_title">システム PATH に追加</string>
+    <string name="command_client_summary">CLI モジュールの管理またはシェルコマンドのコピー</string>
+    <string name="command_client_install">モジュールを自動インストール</string>
+    <string name="command_client_working">モジュールを更新中…</string>
+    <string name="command_client_installed">モジュールをインストールしました。再起動すると appine を直接実行できます</string>
+    <string name="command_client_installed_title">モジュールをインストールしました</string>
+    <string name="command_client_installed_ksu">端末を再起動して appine を実行してください。\n\nコマンドが見つからない場合は、KernelSU で使用中のターミナルアプリの App Profile を開き、「カスタム」を選んで「モジュールのアンマウント」をオフにしてからターミナルを開き直してください。</string>
+    <string name="command_client_uninstall">モジュールをアンインストール</string>
+    <string name="command_client_confirm_uninstall">端末を再起動すると appine コマンドがシステムの PATH から削除されます。</string>
+    <string name="command_client_removal_pending">端末を再起動するとモジュールのアンインストールが完了します</string>
+    <string name="command_client_uninstalled">モジュールをアンインストールしました</string>
+    <string name="command_client_uninstall_failed">Appine CLI モジュールをアンインストールできませんでした</string>
+    <string name="command_client_no_root">Root 権限が必要です</string>
+    <string name="command_client_no_manager">対応する Root 管理アプリが見つかりません</string>
+    <string name="command_client_no_mount">KernelSU でシステムのマウントを設定してください</string>
+    <string name="command_client_mount_pending">KernelSU のマウントモジュールに未反映の変更があります。端末を再起動してからお試しください</string>
+    <string name="command_client_mount_disabled">KernelSU のマウントモジュールが無効です。有効にして端末を再起動してからお試しください</string>
+    <string name="command_client_install_failed">Appine CLI モジュールをインストールできませんでした</string>
+    <string name="command_client_copied">シェルを開くコマンドをコピーしました</string>
+    <string name="command_client_unavailable">Appine CLI が見つかりません</string>
+    <string name="command_access_paused">プライバシーモードで一時停止</string>
+    <string name="command_permission">Appine で Linux コマンドを実行</string>
+    <string name="command_permission_description">許可したアプリは Appine でコマンドを実行し、結果を読み取れます。</string>
 </resources>

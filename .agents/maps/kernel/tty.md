@@ -5,7 +5,7 @@
 >
 > Verified: 2026-11-10 (full mapping: 3 research concerns; 12 claims checked by 2 independent verifiers — 7 confirmed, 4 partial and 1 refuted, all corrected below; bugs and debts recorded)
 >
-> Maintained: 2026-11-15 (targeted verification only since the full mapping; latest change: repoint dependencies to the split module maps)
+> Maintained: 2026-11-19 (targeted verification only since the full mapping; latest change: optional host console I/O deadlines)
 
 ## Responsibilities
 
@@ -73,6 +73,9 @@ exit-time orphan signals (`kernel/process`); the host terminal's raw mode and si
   resize_console, close_console,
   console_foreground, console_cwd, console_password_input}`,
   `Stdio::Console` at spawn and the kernel's `run`.
+
+Host callers can bound console reads and writes with a deadline. Interactive Android exec uses
+that path to let both I/O threads finish before closing the master.
 
 ## Data flow / lifecycle
 

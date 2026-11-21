@@ -5,6 +5,7 @@
 //! and fd tables are accessed only while holding the BKL ([`crate::kernel`]).
 
 use std::fs::File;
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -71,10 +72,26 @@ pub mod oflags {
     pub const SETFL_MASK: u32 = O_APPEND | O_NONBLOCK | O_ASYNC | O_DIRECT | O_NOATIME;
 }
 
+/// A descriptor inherited from the host, or owned by a guest file description.
+#[derive(Clone)]
+pub enum HostFd {
+    Inherited(i32),
+    Owned(Rc<OwnedFd>),
+}
+
+impl HostFd {
+    pub fn raw(&self) -> i32 {
+        match self {
+            Self::Inherited(fd) => *fd,
+            Self::Owned(fd) => fd.as_raw_fd(),
+        }
+    }
+}
+
 /// The kind of an open file.
 pub enum FileKind {
     /// A host fd: `appine-run` hands the host's stdin/stdout/stderr to the guest as they are.
-    Host(i32),
+    Host(HostFd),
     /// A regular file in the inode store.
     Regular {
         /// The inode.
@@ -730,8 +747,12 @@ impl FdTable {
             (1, oflags::O_WRONLY | oflags::O_LARGEFILE),
             (2, oflags::O_WRONLY | oflags::O_LARGEFILE),
         ] {
-            t.install(OpenFile::new(FileKind::Host(fd), flags), false, 0)
-                .unwrap();
+            t.install(
+                OpenFile::new(FileKind::Host(HostFd::Inherited(fd)), flags),
+                false,
+                0,
+            )
+            .unwrap();
         }
         t
     }
@@ -919,7 +940,7 @@ mod tests {
     #[test]
     fn allocates_lowest_free_fd() {
         let mut t = FdTable::with_host_stdio();
-        let f = OpenFile::new(FileKind::Host(1), oflags::O_WRONLY);
+        let f = OpenFile::new(FileKind::Host(HostFd::Inherited(1)), oflags::O_WRONLY);
         assert_eq!(t.install(f.clone(), false, 0), Ok(3));
         t.close(1).unwrap();
         assert_eq!(t.install(f.clone(), true, 0), Ok(1));
@@ -946,7 +967,7 @@ mod tests {
     #[test]
     fn reserved_fds() {
         let mut t = FdTable::with_host_stdio();
-        let f = OpenFile::new(FileKind::Host(1), oflags::O_WRONLY);
+        let f = OpenFile::new(FileKind::Host(HostFd::Inherited(1)), oflags::O_WRONLY);
         assert_eq!(t.reserve(0), Ok(3));
         assert_eq!(t.install(f.clone(), false, 0), Ok(4));
         assert_eq!(t.get(3).err(), Some(Errno::EBADF));

@@ -215,7 +215,10 @@ class TerminalService : Service() {
                             Native.POWER_HALT, Native.POWER_OFF -> exitAll()
                             // Tabs whose shell has ended do not count (restored ones not shown yet
                             // do: their shell has not started)
-                            else -> if (sessions.none { it.isRunning } && listeners.isEmpty() && processes == 0) exitAll()
+                            else -> if (!booting && !GuestCommands.hasActiveRequests &&
+                                sampledAt >= commandLaunchUntil &&
+                                sessions.none { it.isRunning } && listeners.isEmpty() && processes == 0
+                            ) exitAll()
                         }
                     }
                 }
@@ -229,6 +232,58 @@ class TerminalService : Service() {
 
     /** The browser endpoint for the current kernel, independent of terminal sessions. */
     private var browserBridge: BrowserBridge? = null
+    internal var androidShareStatuses: Map<String, AndroidShare.Status> = emptyMap()
+        private set
+    private val androidShare by lazy {
+        AndroidShare(this) { states ->
+            androidShareStatuses = states
+            each { it.onSettingsChanged() }
+        }
+    }
+
+    internal fun saveAndroidShare(previousTarget: String?, source: AndroidShare.Source, target: String): Int? {
+        val normalized = AndroidShare.normalizeTarget(target) ?: return R.string.share_invalid_target
+        val previous = Settings.androidShares(this)
+        if (previousTarget != null && previous.none { it.target == previousTarget }) return R.string.share_mount_failed
+        if (previous.any { it.target != previousTarget && AndroidShare.targetsConflict(it.target, normalized) }) {
+            return R.string.share_target_conflict
+        }
+        if (source is AndroidShare.Source.Tree &&
+            contentResolver.persistedUriPermissions.none { it.uri == source.uri && it.isReadPermission }
+        ) {
+            try {
+                contentResolver.takePersistableUriPermission(source.uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            } catch (_: SecurityException) {
+                return R.string.share_tree_failed
+            }
+        }
+        val config = AndroidShare.Config(source, normalized)
+        val shares = if (previousTarget == null) previous + config else {
+            previous.map { if (it.target == previousTarget) config else it }
+        }
+        updateAndroidShares(previous, shares)
+        return null
+    }
+
+    internal fun removeAndroidShare(target: String) {
+        val previous = Settings.androidShares(this)
+        updateAndroidShares(previous, previous.filterNot { it.target == target })
+    }
+
+    private fun updateAndroidShares(previous: List<AndroidShare.Config>, shares: List<AndroidShare.Config>) {
+        Settings.setAndroidShares(this, shares)
+        val retainedTrees = shares.mapNotNull { (it.source as? AndroidShare.Source.Tree)?.uri }.toSet()
+        for (uri in previous.mapNotNull { (it.source as? AndroidShare.Source.Tree)?.uri }.toSet() - retainedTrees) {
+            runCatching { contentResolver.releasePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+        }
+        val previousByTarget = previous.associateBy { it.target }
+        androidShareStatuses = shares.associate { share ->
+            val status = androidShareStatuses[share.target]?.takeIf { previousByTarget[share.target] == share }
+            share.target to (status ?: AndroidShare.Status.STARTING)
+        }
+        androidShare.update(if (booting) 0 else machine, shares)
+        each { it.onSettingsChanged() }
+    }
 
     /**
      * [onDestroy] has run: a thread that outlives the service (a download) must not
@@ -250,6 +305,30 @@ class TerminalService : Service() {
      * replaced as soon as the new kernel is up or has failed.
      */
     private var pendingReplace: Rootfs.Distro? = null
+
+    @Volatile internal var commandMachine = 0L
+        private set
+    @Volatile internal var commandBlocked = false
+        private set
+    private var commandBridge: CommandBridge? = null
+    private var commandLaunchUntil = 0L
+
+    internal fun setCommandAccess(enabled: Boolean) {
+        if (enabled && Settings.privacyMode(this)) return
+        Settings.setTerminalAccess(this, enabled)
+        settingsChanged()
+    }
+
+    private fun updateCommandAccess() {
+        commandBlocked = destroyed || exiting || startError != null || !Settings.terminalAccess(this)
+        commandMachine = if (commandBlocked || booting) 0 else machine
+        if (commandBlocked) {
+            commandBridge?.close()
+            commandBridge = null
+        } else if (commandBridge == null) {
+            commandBridge = CommandBridge.open(applicationContext)
+        }
+    }
 
     /** The kernel handle, 0 before the start. */
     var machine = 0L
@@ -431,6 +510,8 @@ class TerminalService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        GuestCommands.service = this
+        updateCommandAccess()
         Privacy.addListener(privacyChanged)
         notifications.createChannels()
         val notification = notification()
@@ -588,6 +669,8 @@ class TerminalService : Service() {
                 Rootfs.ensureNetworkConfig(this)
                 Rootfs.ensureContainersConfig(this)
                 Rootfs.ensureLoginTools(this)
+                runCatching { Rootfs.ensureShareClient(this) }
+                    .onFailure { Log.w(TAG, "cannot stage the phone file sharing client", it) }
                 startKernel(tier, importing = distro != null)
             }
             main.post {
@@ -649,9 +732,11 @@ class TerminalService : Service() {
             main.post {
                 if (machine != m) return@post
                 booting = false
+                updateCommandAccess()
                 guestActivity.reset(SystemClock.elapsedRealtime())
                 updateWakeLock()
                 if (failed.isNotEmpty()) notifications.bootFailures(failed)
+                androidShare.update(m, Settings.androidShares(this))
             }
         }
         getSystemService(ConnectivityManager::class.java).registerDefaultNetworkCallback(network)
@@ -687,6 +772,7 @@ class TerminalService : Service() {
             } else {
                 progress = null
                 startError = error
+                updateCommandAccess()
                 updateWakeLock()
                 updateNotification()
                 each { l -> l.onMachineReady(error) }
@@ -748,6 +834,7 @@ class TerminalService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_EXIT_ALL -> exitAll()
+            ACTION_START_COMMAND -> commandLaunchUntil = SystemClock.elapsedRealtime() + 5_000L
             ACTION_CANCEL_SWITCH -> cancelSwitch()
             ACTION_TOGGLE_KEEP_AWAKE -> setRunPolicy(Settings.nextRunPolicy(this))
             // Legacy report PendingIntents still pass through the clipboard privacy check.
@@ -1086,6 +1173,7 @@ class TerminalService : Service() {
     }
 
     private fun settingsChanged() {
+        updateCommandAccess()
         updateNotification()
         each { it.onSettingsChanged() }
     }
@@ -1256,6 +1344,8 @@ class TerminalService : Service() {
      * kernel still there when the sessions end, the Activity would think the last tab was closed.
      */
     private fun detach(): Long {
+        commandMachine = 0
+        androidShare.update(0, emptyList())
         browserBridge?.close()
         browserBridge = null
         val m = machine
@@ -1286,6 +1376,11 @@ class TerminalService : Service() {
     override fun onDestroy() {
         Privacy.removeListener(privacyChanged)
         destroyed = true
+        commandMachine = 0
+        commandBridge?.close()
+        commandBridge = null
+        if (GuestCommands.service === this) GuestCommands.service = null
+        androidShare.close()
         browserBridge?.close()
         browserBridge = null
         // A download still under way has nothing left to replace
@@ -1334,6 +1429,7 @@ class TerminalService : Service() {
         /** The ongoing notification (the other ids are [Notifications]'). */
         private const val NOTIFICATION_ID = 1
         private const val POLL_MS = GuestActivity.SAMPLE_MS
+        internal const val ACTION_START_COMMAND = "io.github.mthli.appine.START_COMMAND"
         private const val ACTION_EXIT_ALL = "io.github.mthli.appine.EXIT_ALL"
         private const val ACTION_CANCEL_SWITCH = "io.github.mthli.appine.CANCEL_SWITCH"
         private const val ACTION_TOGGLE_KEEP_AWAKE = "io.github.mthli.appine.TOGGLE_KEEP_AWAKE"

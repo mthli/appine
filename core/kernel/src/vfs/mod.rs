@@ -2581,9 +2581,18 @@ impl Vfs {
         source: Vec<u8>,
         conn: impl FnOnce(u64) -> fuse::Conn,
     ) -> (MountId, std::rc::Rc<RefCell<fuse::Conn>>) {
+        let backing = if flags & ms::RDONLY != 0 {
+            self.fuse.borrow().backing(&source)
+        } else {
+            None
+        };
         let id = self.add_mount(Fs::Fuse, Node::ROOT, point, flags, source, None);
         let dev = self.with_mount(id, |m| m.dev).unwrap_or(0);
-        let conn = std::rc::Rc::new(RefCell::new(conn(dev)));
+        let mut connection = conn(dev);
+        if connection.opts.subtype.as_deref() == Some(b"appine-share") {
+            connection.backing = backing;
+        }
+        let conn = std::rc::Rc::new(RefCell::new(connection));
         let root = self.fuse.borrow_mut().add(conn.clone());
         self.update_mount(id, |m| m.root = Node::Fuse(id, root));
         self.mounts_changed();

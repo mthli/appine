@@ -152,6 +152,10 @@ internal object Native {
     @JvmStatic
     external fun setRoutes(machine: Long, routes: Array<String>?)
 
+    /** Takes ownership of the socket, or revokes the share's authorization when fd is -1. */
+    @JvmStatic
+    external fun setFuseBacking(machine: Long, device: String, fd: Int, protocol: Int = 0): Boolean
+
     /** Creates a console (an in-process PTY) and returns its number. */
     @JvmStatic
     @Throws(IOException::class)
@@ -165,16 +169,34 @@ internal object Native {
     @Throws(IOException::class)
     external fun spawn(machine: Long, console: Int, program: String, argv: Array<String>, envp: Array<String>): Int
 
+    @JvmStatic
+    @Throws(IOException::class)
+    external fun spawnRedirected(
+        machine: Long, program: String, argv: Array<String>, envp: Array<String>,
+        stdin: Int, stdout: Int, stderr: Int,
+    ): Int
+
+    @JvmStatic
+    external fun waitCommand(machine: Long, pid: Int): Int
+
+    @JvmStatic
+    external fun cancelCommand(machine: Long, pid: Int)
+
     /**
      * Reads console output: returns the number of bytes, 0 when the session ended, -1 when the
-     * console is closed.
+     * console is closed, -2 when a nonzero timeout expires.
      */
     @JvmStatic
-    external fun read(machine: Long, console: Int, buffer: ByteArray): Int
+    external fun read(machine: Long, console: Int, buffer: ByteArray, timeoutMillis: Int = 0): Int
 
-    /** Input to a console: returns the number of bytes written, -1 when the session has ended. */
+    /**
+     * Input to a console. With a nonzero timeout, returns a partial write or 0 if timed out.
+     * Returns -1 when the session has ended.
+     */
     @JvmStatic
-    external fun write(machine: Long, console: Int, buffer: ByteArray, offset: Int, length: Int): Int
+    external fun write(
+        machine: Long, console: Int, buffer: ByteArray, offset: Int, length: Int, timeoutMillis: Int = 0,
+    ): Int
 
     @JvmStatic
     external fun resize(machine: Long, console: Int, rows: Int, cols: Int)

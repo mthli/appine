@@ -5,14 +5,14 @@
 >
 > Verified: 2026-11-10 (full mapping: 3 research concerns; 16 claims checked by 2 independent verifiers — 14 confirmed and 2 partial, corrected below; bugs and debts recorded)
 >
-> Maintained: 2026-11-15 (targeted verification only since the full mapping; latest change: split android/build and android/tests into separate maps)
+> Maintained: 2026-11-19 (targeted verification only since the full mapping; latest change: queue native-open release messages without waiting under the BKL)
 
 ## Responsibilities
 
 `android/native` connects the Kotlin app to the Rust kernel: the kernel handle table, JNI
 entry points, error and panic handling, stderr to logcat, and the guest browser client.
 
-Root: `hosts/android/src/lib.rs`, `hosts/android/open-url.c`,
+Root: `hosts/android/src/lib.rs`, `hosts/android/src/share_fd.rs`, `hosts/android/open-url.c`,
 `android/app/src/main/java/io/github/mthli/appine/Native.kt` and `MainApplication.kt`.
 
 The build, manifests, assets and release packaging are `android/build`; instrumentation is
@@ -25,7 +25,7 @@ with view and rendering portions in `android/vtview` and `android/vtrender`.
 - `MACHINES` — a mutex-protected map from handle (`jlong`, from `NEXT_HANDLE`, counting up from 1
   and never reused in a process) to `Arc<Machine>`; a poisoned lock is recovered. `vt.rs` looks
   kernels up in the same table.
-- `Native` — `internal object` with 37 `@JvmStatic external` functions, 17 of them
+- `Native` — `internal object` with 40 `@JvmStatic external` functions, 18 of them
   `@Throws(IOException::class)`; its initialiser loads the library and calls the private
   `init(BuildConfig.DEBUG)`.
 - `guarded!` — the macro every JNI body runs in: `(name, fallback, body)`, or
@@ -35,6 +35,13 @@ with view and rendering portions in `android/vtview` and `android/vtrender`.
 
 - Init: `init(verbose)` (private; stderr redirect, debug log).
 - Store: `importRootfs`, `syncRootfs`, `writeFile`, `readFile` (null on `ENOENT`).
+- Shares: `setFuseBacking` consumes the app's duplicate of a verified socket to the root helper or
+  the app's document-tree bridge, and registers it on one machine and share source. A negative
+  descriptor revokes the registration. `share_fd.rs` accepts only read-only regular-file descriptors
+  from that socket. Root shares that advertise metadata can also return a handle and an open
+  file descriptor in the same request. Version 2 of the root backing protocol accepts a
+  one-way release frame. The native code uses a nonblocking write and falls back if the
+  frame cannot be queued.
 - Browse: `browseStat`, `browseList`, `browseOpen`, `browseSniff`, `browseSearch` (read);
   `browseCreate`, `browseRemove`, `browseRename`, `browseMove`, `browseOpenWrite`, `browseWritten`
   (through the store's change path; `browseWritten` is not `@Throws` and ignores every error).
@@ -50,6 +57,11 @@ with view and rendering portions in `android/vtview` and `android/vtrender`.
   `write` (until all bytes are written), `resize`, `closeConsole`, `waitFor`, `consoleCwd`. The app
   itself no longer calls `read` or `resize` (the terminal's pump and resizes go through `vt.rs`);
   `MachineTest` does.
+- External jobs use spawnRedirected, waitCommand and cancelCommand. JNI duplicates each supplied
+  Android descriptor before handing it to the kernel. A one-shot wait releases the watch entry;
+  cancellation signals the job's process group while its tracked process is live.
+- Interactive exec uses `Native.read` and `Native.write` with bounded waits to stop socket and console I/O
+  before closing the console and releasing its number.
 
 ## Data flow / lifecycle
 

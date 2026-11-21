@@ -39,4 +39,8 @@
         <item name="android:dropDownVerticalOffset">4dp</item>
     </style>
 
+    <style name="ThemeOverlay.Appine.FolderShareDialog" parent="ThemeOverlay.Material3.MaterialAlertDialog">
+        <item name="buttonBarPositiveButtonStyle">@style/Widget.Material3.Button</item>
+    </style>
+
 </resources>

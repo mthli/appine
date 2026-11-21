@@ -5,7 +5,7 @@
 >
 > Verified: 2026-11-14 (full mapping: 5 research concerns; 18 claims checked by 3 independent verifiers — 15 confirmed and 3 partial, corrected below)
 >
-> Maintained: 2026-11-17 (targeted verification only since the full mapping; latest change: stronger contrast between selected and ordinary terminal controls)
+> Maintained: 2026-11-19 (targeted verification only since the full mapping; latest change: show system PATH module status and uninstall actions)
 
 ## Responsibilities
 
@@ -78,6 +78,16 @@ assets are `android/build`; authentication is `android/privacy`, notice UI `andr
   and the `OpenMultipleDocuments` activity-result callback for import.
 
 ## Data flow / lifecycle
+
+### Android folder sharing settings
+
+- Folder sharing opens a list of saved mappings showing the source, Linux destination, access
+  mode. Pending or failed mappings also show their mount status. The management dialog can copy
+  the active Linux path, edit,
+  replace or stop that mapping.
+- Adding or replacing a source uses the root browser when available and the Android folder
+  picker otherwise. Both flows configure a Linux destination and only root sources offer the
+  write toggle. TerminalService validates, persists and reconciles the resulting list.
 
 ### Binding and choosing a tab
 
@@ -289,6 +299,13 @@ assets are `android/build`; authentication is `android/privacy`, notice UI `andr
   text and, when there is some, asks ("Let the program read the clipboard?", up to 300 characters
   shown, Allow and Deny), one question at a time, whose answer covers every read queued meanwhile;
   an empty clipboard, or one without text, is answered at once (`VtSession.answerClipboardRead`).
+
+The system PATH settings row can copy a ready-to-run shell command using the installed host
+CLI path or ask the Root manager to install an archive containing system/bin/appine.
+Copying the command or installing the module enables Terminal access. The menu checks the
+module's live and staged state and offers uninstall after install. Uninstall is confirmed
+in the dialog and applied on reboot. KernelSU's install confirmation explains how to make
+the system command visible to the user's choice of terminal app.
 
 ## Dependencies (inbound / outbound)
 

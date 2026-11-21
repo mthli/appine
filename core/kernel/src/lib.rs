@@ -54,6 +54,7 @@ mod uaccess;
 mod unix;
 mod vdso;
 pub mod vfs;
+pub use vfs::fuse::FuseBacking;
 mod watchdog;
 
 pub use appine_engine::DbtStats;

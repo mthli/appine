@@ -5,7 +5,7 @@
 >
 > Verified: 2026-11-15 (split out of the android/native full mapping of 2026-11-10; the boundary was checked against the source at the split)
 >
-> Maintained: 2026-11-19 (targeted verification only since the full mapping; latest change: Android and Cargo release versions)
+> Maintained: 2026-11-19 (targeted verification only since the full mapping; latest change: Android and Cargo release versions, and package the executable CLI with the Android native libraries)
 
 ## Responsibilities
 
@@ -90,9 +90,11 @@ fetch/provisioning `android/setup`. CI orchestration remains `harness`.
   scripts/fetch-rootfs first" when any is missing), checked-in `notices/`, and
   the terminal font (`fonts/`, `android/vtrender`); `BuildConfig.ALPINE_BRANCH` carries the
   branch.
-- SDK: min 30, compile and target 37; no ABI filter (only `arm64-v8a` is built); uncompressed
-  native libraries (`useLegacyPackaging = false`) so 16 KB-aligned `LOAD` segments (NDK 29's
-  default; the build sets no page-size flag) map directly from the APK.
+- SDK: min 30, compile and target 37; only `arm64-v8a` is built. Native libraries use legacy
+  packaging so Android extracts the directory-share executable into `nativeLibraryDir`.
+  `AndroidShareTask` builds `libappine-share.so` from `contrib/android-share-rust` with Cargo as a
+  static ARM64 Linux executable. The guest opens its FUSE device and passes the descriptor to
+  `fuser::Session::from_fd`. The helper uses 64 KiB ELF segment alignment.
 - Warnings fail: every Kotlin compilation (the app and the instrumentation tests, local builds
   included) treats compiler warnings as errors, and lint treats its warnings as errors, except
   `GradleDependency`, `AndroidGradlePluginVersion`, `OldTargetApi`, `ExpiringTargetSdkVersion` and
@@ -102,6 +104,11 @@ fetch/provisioning `android/setup`. CI orchestration remains `harness`.
   JNI declarations and the public void `VtSession.on*` callbacks looked up by the native pump;
   callbacks outside that pattern need a matching keep rule. The release mapping is under
   `app/build/outputs/mapping/release/`.
+
+The terminal-client asset task uses Go and the ARM64 Android NDK compiler
+to build the PIE from contrib/android-exec. The application ID selects the
+CLI's default startup target. Android extracts the executable from the APK's
+ARM64 native libraries to its native library directory.
 
 ### Notices
 
@@ -144,6 +151,10 @@ fetch/provisioning `android/setup`. CI orchestration remains `harness`.
   `DiagnosticProvider` uses the existing AndroidX FileProvider with manifest path metadata,
   granting only generated archives from `cache/diagnostic-exports`; no new permission or
   dependency is required. Retained diagnostic files use the app's no-backup directory.
+- CommandStartActivity is a no-display, exported entry point for the shell client. It checks
+  Terminal access before starting TerminalService.
+- ExecCommandService is exported with the app-ID-scoped dangerous RUN_COMMAND permission.
+  TerminalService remains private.
 - Launcher, settings, licenses list and license reader activities (the application theme
   `Theme.Appine`, Material 3; the
   launcher overrides it with `Theme.Appine.Terminal`; settings and licenses leave `uiMode` out of
@@ -191,7 +202,7 @@ fetch/provisioning `android/setup`. CI orchestration remains `harness`.
 ### Outbound
 
 - cargo-ndk, NDK 29, AGP, Gradle and the Android libraries listed above.
-- Zig 0.17.x, libghostty-vt 1.0.0 source/dependency archives and `cc`.
+- Zig 0.17.x, libghostty-vt 1.0.0 source/dependency archives, the ARM64 musl Rust target and `cc`.
 - `android/native` runtime sources, terminal sources and `android/setup`'s `scripts/fetch-rootfs` output.
 - Release archives use git, `cargo vendor`, `fetch-ghostty`, `fetch-rootfs`,
   gitlab.alpinelinux.org, distfiles.alpinelinux.org, curl, tar, awk and a SHA-512 tool.

@@ -5,7 +5,7 @@
 >
 > Verified: 2026-11-09 (full mapping: 3 research concerns; 14 claims checked by 2 independent verifiers — 10 confirmed and 4 partial, all corrected below; the bugs the research and verification found (umount races, parent loops, program copies, interrupts, oversized requests, open ENOSYS, clone ioctl, subtypes, xattr rules, link order, appends, mmap errors) fixed before this line)
 >
-> Maintained: 2026-11-11 (targeted verification only since the full mapping; latest change: a node drop_caches keeps for a release in flight is forgotten when the release is answered)
+> Maintained: 2026-11-19 (targeted verification only since the full mapping; latest change: use the host descriptor for mappings and release root-share tickets directly)
 
 ## Responsibilities
 
@@ -222,7 +222,7 @@ the copy mappings (`kernel/mm`), mountinfo (`kernel/procfs`).
 ### Permission
 
 - `fuse_permission` (6.1's `fuse_permission`): EACCES, root included, unless the mount allows the
-  process (with `allow_other`, anyone in the mounter's user namespace or one below; otherwise only
+  process (with `allow_other`, anyone in the mounter's user namespace or one below, compared by namespace ID; otherwise only
   a process whose real, effective and saved user and group IDs are the mounter's). Then with
   `default_permissions` the cached attributes decide (fetched again when out of date; callers able
   to search everything need none for a search); without it only executing a regular file is
@@ -251,8 +251,18 @@ the copy mappings (`kernel/mm`), mountinfo (`kernel/procfs`).
 
 ### Reading, writing and positions
 
-- read and write go to the daemon in requests of the negotiated size, stopping at a short reply;
-  errors after the first piece return what was done. One guest read or write moves up to 8 MiB.
+- Reads and writes normally go to the daemon in requests of the negotiated size, stopping at a
+  short reply. Errors after the first piece return what was done. One call moves up to 8 MiB.
+- A read-only `fuse.appine-share` mount can opt into host file backing registered for its source.
+  After the guest permission check, a root-managed share can return a read-only file and a
+  share-local handle from the backing socket. If it cannot open a file, the kernel uses
+  `FUSE_OPEN`, which can still attach a host file to a tagged handle. Ordinary reads call the
+  attached file with the BKL released. Mapping fills can read from the same descriptor.
+  A host read that cannot complete falls back using the share-local handle. Read-only root
+  backing skips the helper's no-op flush. A native open can queue its release over the backing
+  socket with a nonblocking write, with background FUSE release as a fallback. Revoking the
+  mount backing disables direct reads on open handles. Descriptor stat and the mapping
+  length use the open handle. The kernel caches those attributes for the current syscall.
 - A file opened `FOPEN_STREAM` has no position (offset 0); with `FOPEN_NONSEEKABLE` or `STREAM`,
   pread, pwrite and lseek are ESPIPE.
 - The position is taken as unlocked I/O takes it (`pos_busy`) and advanced past what moved; a
@@ -270,6 +280,11 @@ the copy mappings (`kernel/mm`), mountinfo (`kernel/procfs`).
 - getdents64 lists through `FUSE_READDIR` a page at a time on the first call and after a seek to
   0, keeping the daemon's own `.` and `..`; an empty name, one over 1024 bytes or with `/` is EIO.
   Seeking takes only `SEEK_SET` and `SEEK_CUR`.
+- A root-managed read-only Appine share can supply `LOOKUP` and `GETATTR` replies and a
+  directory snapshot directly. Its requests pin the same nodes while the BKL is released.
+  The kernel parses and caches replies as usual. An unavailable backing uses the FUSE
+  daemon, which shares inode identities with the backing. An open native directory uses its
+  snapshot until closed, subject to mount revocation.
 
 ### Namespace changes
 
@@ -394,8 +409,8 @@ the copy mappings (`kernel/mm`), mountinfo (`kernel/procfs`).
 - **No page cache:** a mapped page keeps what was read when first touched, so a shared mapping
   never sees later writes through the mount or another process, separate mmap calls read
   separately, and a shared writable mapping is refused (SQLite's WAL `-shm` file and programs
-  writing through `MAP_SHARED` fail on FUSE); reads and writes always reach the daemon (no
-  read-ahead for read(2), writeback or readdirplus).
+  writing through `MAP_SHARED` fail on FUSE). There is no guest read-ahead for read(2), writeback
+  or readdirplus.
 - **Forgetting is coarser than Linux's:** nodes go only above 16384 or with `drop_caches`, not when
   a file unlinked through the mount is no longer used (Linux forgets it at once); an O_PATH
   descriptor in flight in an `SCM_RIGHTS` message does not keep its node, which then answers

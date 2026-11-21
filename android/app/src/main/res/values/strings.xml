@@ -298,4 +298,66 @@
     <string name="copy_report">Copy report</string>
     <string name="report_copied">Report copied</string>
 
+
+    <!-- Android directory mount -->
+    <string name="share_title">Folder sharing</string>
+    <string name="share_off">Not shared</string>
+    <string name="share_starting">Sharing…</string>
+    <string name="share_android_folder">Phone folder</string>
+    <string name="share_android_folder_unknown">Selected folder</string>
+    <string name="share_mode_read_only">Read-only</string>
+    <string name="share_mode_read_write">Read-write</string>
+    <string name="share_mount_point">Mount point</string>
+    <string name="share_copy_path">Copy path</string>
+    <string name="share_path_copied">Path copied</string>
+    <string name="share_root_failed">Could not open the Android path. Check the path and approve root access.</string>
+    <string name="share_tree_failed">Could not read the selected folder. Try sharing it again.</string>
+    <string name="share_mount_failed">Could not share the folder. Choose it again to retry.</string>
+    <string name="share_pick">Choose folder</string>
+    <string name="share_change">Change folder</string>
+    <string name="share_root">Go to path</string>
+    <string name="share_confirm">Share folder</string>
+    <string name="share_access_write">Linux can create, edit, and delete files.</string>
+    <string name="share_disconnect">Stop sharing</string>
+    <string name="share_writable">Allow changes to original files</string>
+    <string name="share_mount">Share folder</string>
+    <string name="share_invalid_path">Enter an absolute Android path</string>
+    <string name="share_parent">Parent folder</string>
+    <string name="share_folder_read_failed">Could not open this folder.</string>
+    <plurals name="share_count">
+        <item quantity="one">%d folder</item>
+        <item quantity="other">%d folders</item>
+    </plurals>
+    <string name="share_add">Add folder</string>
+    <string name="share_edit">Edit</string>
+    <string name="share_save">Save</string>
+    <string name="share_target_helper">Leave blank to use %1$s.</string>
+    <string name="share_invalid_target">Enter an absolute path</string>
+    <string name="share_target_conflict">This mount point overlaps another mount point</string>
+    <string name="command_access">Terminal access</string>
+    <string name="command_access_summary">Allow apps on this device to run Linux commands in Appine</string>
+    <string name="command_client_copy_shell">Copy shell command</string>
+    <string name="command_client_title">Integrate into system PATH</string>
+    <string name="command_client_summary">Manage the CLI module or copy the shell command</string>
+    <string name="command_client_install">Install module automatically</string>
+    <string name="command_client_working">Updating module…</string>
+    <string name="command_client_installed">Module installed. Restart Android to use appine from PATH</string>
+    <string name="command_client_installed_title">Module installed</string>
+    <string name="command_client_installed_ksu">Restart your phone, then run appine.\n\nIf the command is still missing, open your terminal app’s App Profile in KernelSU, choose Custom, turn off “Umount modules”, and reopen the terminal.</string>
+    <string name="command_client_uninstall">Uninstall module</string>
+    <string name="command_client_confirm_uninstall">The appine command will be removed from the system PATH when you restart your phone.</string>
+    <string name="command_client_removal_pending">Restart your phone to finish uninstalling the module</string>
+    <string name="command_client_uninstalled">Module uninstalled</string>
+    <string name="command_client_uninstall_failed">Could not uninstall the Appine CLI module</string>
+    <string name="command_client_no_root">Root permission is required</string>
+    <string name="command_client_no_manager">No supported Root manager found</string>
+    <string name="command_client_no_mount">Set up system mounting in KernelSU</string>
+    <string name="command_client_mount_pending">Restart Android to apply the KernelSU mount module changes, then try again</string>
+    <string name="command_client_mount_disabled">Enable the KernelSU mount module, restart Android, and try again</string>
+    <string name="command_client_install_failed">Could not install the Appine CLI module</string>
+    <string name="command_client_copied">Shell command copied</string>
+    <string name="command_client_unavailable">Appine command-line client is unavailable</string>
+    <string name="command_access_paused">Paused in privacy mode</string>
+    <string name="command_permission">Run Linux commands in Appine</string>
+    <string name="command_permission_description">Authorized apps can run commands in Appine and read the results.</string>
 </resources>

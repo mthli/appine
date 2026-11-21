@@ -234,6 +234,8 @@ OOM killer.
 - [Module maps](.agents/maps) for current behavior and tests, and
   [design decisions](.agents/decisions) for the reasoning behind changes.
 - [Development milestones](docs/milestones.md) for earlier measurements and implementation history.
+- [Share Android folders with Appine](android/README.md#sharing-android-folders).
+- [Run Appine commands from other apps](android/README.md#running-commands-from-other-apps).
 - Coding agents should start with [AGENTS.md](AGENTS.md).
 
 ## License

@@ -291,4 +291,65 @@
     <string name="copy_report">複製報告</string>
     <string name="report_copied">已複製報告</string>
 
+
+    <!-- Android directory mount -->
+    <string name="share_title">分享資料夾</string>
+    <string name="share_off">未分享</string>
+    <string name="share_starting">正在分享…</string>
+    <string name="share_android_folder">手機資料夾</string>
+    <string name="share_android_folder_unknown">已選資料夾</string>
+    <string name="share_mode_read_only">唯讀</string>
+    <string name="share_mode_read_write">讀寫</string>
+    <string name="share_mount_point">掛載點</string>
+    <string name="share_copy_path">複製路徑</string>
+    <string name="share_path_copied">已複製路徑</string>
+    <string name="share_root_failed">無法開啟 Android 路徑。請確認路徑並允許 Appine 使用 root。</string>
+    <string name="share_tree_failed">無法讀取所選資料夾，請重新選取後再試。</string>
+    <string name="share_mount_failed">分享失敗，請重新選取資料夾。</string>
+    <string name="share_pick">選取資料夾</string>
+    <string name="share_change">更換資料夾</string>
+    <string name="share_root">前往路徑</string>
+    <string name="share_confirm">分享資料夾</string>
+    <string name="share_access_write">Linux 可以新增、修改或刪除檔案</string>
+    <string name="share_disconnect">停止分享</string>
+    <string name="share_writable">允許修改原始檔案</string>
+    <string name="share_mount">開始共享</string>
+    <string name="share_invalid_path">請輸入 Android 絕對路徑</string>
+    <string name="share_parent">返回上一層</string>
+    <string name="share_folder_read_failed">無法開啟這個資料夾。</string>
+    <plurals name="share_count">
+        <item quantity="other">%d 個資料夾</item>
+    </plurals>
+    <string name="share_add">新增資料夾</string>
+    <string name="share_edit">編輯</string>
+    <string name="share_save">儲存</string>
+    <string name="share_target_helper">留空使用 %1$s</string>
+    <string name="share_invalid_target">請輸入絕對路徑</string>
+    <string name="share_target_conflict">掛載點重複或重疊</string>
+    <string name="command_access">終端機存取</string>
+    <string name="command_access_summary">允許本機應用程式在 Appine 中執行 Linux 指令</string>
+    <string name="command_client_copy_shell">複製進入 Shell 的指令</string>
+    <string name="command_client_title">整合到系統路徑</string>
+    <string name="command_client_summary">管理命令列模組或複製指令</string>
+    <string name="command_client_install">自動安裝模組</string>
+    <string name="command_client_working">正在更新模組…</string>
+    <string name="command_client_installed">已安裝模組。重新啟動後即可執行 appine</string>
+    <string name="command_client_installed_title">模組已安裝</string>
+    <string name="command_client_installed_ksu">重新啟動手機後執行 appine。\n\n若仍找不到指令，請在 KernelSU 中開啟所用終端機的應用程式設定，選擇「自訂」並關閉「卸載模組」，再重新開啟終端機。</string>
+    <string name="command_client_uninstall">解除安裝模組</string>
+    <string name="command_client_confirm_uninstall">重新啟動手機後，系統路徑中的 appine 指令將被移除。</string>
+    <string name="command_client_removal_pending">重新啟動手機以完成模組解除安裝</string>
+    <string name="command_client_uninstalled">模組已解除安裝</string>
+    <string name="command_client_uninstall_failed">無法解除安裝 Appine 命令列模組</string>
+    <string name="command_client_no_root">需要授予 Root 權限</string>
+    <string name="command_client_no_manager">找不到支援的 Root 管理器</string>
+    <string name="command_client_no_mount">請先在 KernelSU 中設定系統掛載</string>
+    <string name="command_client_mount_pending">KernelSU 的掛載模組有待生效的變更，請重新啟動手機後再試</string>
+    <string name="command_client_mount_disabled">KernelSU 的掛載模組已停用，請啟用後重新啟動手機再試</string>
+    <string name="command_client_install_failed">無法安裝 Appine 命令列模組</string>
+    <string name="command_client_copied">已複製 Shell 指令</string>
+    <string name="command_client_unavailable">找不到 Appine 命令列工具</string>
+    <string name="command_access_paused">隱私模式下暫停</string>
+    <string name="command_permission">在 Appine 中執行 Linux 命令</string>
+    <string name="command_permission_description">獲授權的應用程式可在 Appine 中執行命令並讀取結果。</string>
 </resources>

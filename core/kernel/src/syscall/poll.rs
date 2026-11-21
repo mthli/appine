@@ -1400,7 +1400,7 @@ fn poll_now(f: &OpenFile, wanted: i16, depth: u32) -> i16 {
 /// The current readiness of an open file: (events already known, host fd to ask).
 fn readiness(f: &OpenFile, depth: u32) -> (i16, Option<i32>) {
     match &f.kind {
-        FileKind::Host(fd) => (0, Some(*fd)),
+        FileKind::Host(fd) => (0, Some(fd.raw())),
         FileKind::Socket(s) => super::net::readiness(&s.borrow()),
         FileKind::Pipe(end) => {
             let p = end.pipe.borrow();
@@ -1539,7 +1539,7 @@ fn took_change(f: &OpenFile, ev: i16) {
 /// The host fd behind an open file (host stdio, TCP/UDP sockets).
 fn host_fd(f: &OpenFile) -> Option<i32> {
     match &f.kind {
-        FileKind::Host(fd) => Some(*fd),
+        FileKind::Host(fd) => Some(fd.raw()),
         FileKind::Socket(s) => match &*s.borrow() {
             // Messages received by a raw ICMP socket are in the tap's queue (crate::rawicmp);
             // the host fd is not looked at
@@ -1804,7 +1804,10 @@ mod tests {
         use std::os::unix::net::UnixStream;
 
         let (socket, peer) = UnixStream::pair().unwrap();
-        let host = OpenFile::new(FileKind::Host(socket.as_raw_fd()), oflags::O_RDWR);
+        let host = OpenFile::new(
+            FileKind::Host(crate::fd::HostFd::Inherited(socket.as_raw_fd())),
+            oflags::O_RDWR,
+        );
         let event = OpenFile::new(
             FileKind::EventFd(Rc::new(RefCell::new(EventFd {
                 count: 1,

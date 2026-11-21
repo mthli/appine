@@ -291,4 +291,65 @@
     <string name="copy_report">보고서 복사</string>
     <string name="report_copied">보고서를 복사했습니다</string>
 
+
+    <!-- Android directory mount -->
+    <string name="share_title">폴더 공유</string>
+    <string name="share_off">공유 안 함</string>
+    <string name="share_starting">공유 시작 중…</string>
+    <string name="share_android_folder">휴대전화 폴더</string>
+    <string name="share_android_folder_unknown">선택한 폴더</string>
+    <string name="share_mode_read_only">읽기 전용</string>
+    <string name="share_mode_read_write">읽기/쓰기</string>
+    <string name="share_mount_point">마운트 지점</string>
+    <string name="share_copy_path">경로 복사</string>
+    <string name="share_path_copied">경로를 복사했습니다</string>
+    <string name="share_root_failed">Android 경로를 열 수 없습니다. 경로를 확인하고 root를 허용하세요.</string>
+    <string name="share_tree_failed">선택한 폴더를 읽을 수 없습니다. 폴더를 다시 선택하세요.</string>
+    <string name="share_mount_failed">폴더를 공유할 수 없습니다. 다시 선택하세요.</string>
+    <string name="share_pick">폴더 선택</string>
+    <string name="share_change">폴더 변경</string>
+    <string name="share_root">경로로 이동</string>
+    <string name="share_confirm">폴더 공유</string>
+    <string name="share_access_write">Linux에서 파일을 만들고 수정하고 삭제할 수 있습니다</string>
+    <string name="share_disconnect">공유 중지</string>
+    <string name="share_writable">원본 파일 변경 허용</string>
+    <string name="share_mount">공유 시작</string>
+    <string name="share_invalid_path">Android 절대 경로를 입력하세요</string>
+    <string name="share_parent">상위 폴더</string>
+    <string name="share_folder_read_failed">이 폴더를 열 수 없습니다.</string>
+    <plurals name="share_count">
+        <item quantity="other">폴더 %d개</item>
+    </plurals>
+    <string name="share_add">폴더 추가</string>
+    <string name="share_edit">편집</string>
+    <string name="share_save">저장</string>
+    <string name="share_target_helper">비워 두면 %1$s를 사용합니다.</string>
+    <string name="share_invalid_target">절대 경로를 입력하세요</string>
+    <string name="share_target_conflict">다른 마운트 지점과 겹칩니다</string>
+    <string name="command_access">터미널 접근</string>
+    <string name="command_access_summary">이 기기의 앱에서 Appine의 Linux 명령 실행 허용</string>
+    <string name="command_client_copy_shell">셸 실행 명령 복사</string>
+    <string name="command_client_title">시스템 PATH에 추가</string>
+    <string name="command_client_summary">CLI 모듈 관리 또는 셸 명령 복사</string>
+    <string name="command_client_install">모듈 자동 설치</string>
+    <string name="command_client_working">모듈 업데이트 중…</string>
+    <string name="command_client_installed">모듈을 설치했습니다. 재부팅하면 appine을 바로 실행할 수 있습니다</string>
+    <string name="command_client_installed_title">모듈이 설치되었습니다</string>
+    <string name="command_client_installed_ksu">기기를 다시 시작하고 appine을 실행하세요.\n\n명령을 찾을 수 없다면 KernelSU에서 사용 중인 터미널 앱의 앱 프로필을 열고 ‘사용자 정의’를 선택한 뒤 ‘모듈 마운트 해제’를 끈 다음 터미널을 다시 여세요.</string>
+    <string name="command_client_uninstall">모듈 제거</string>
+    <string name="command_client_confirm_uninstall">기기를 다시 시작하면 시스템 PATH에서 appine 명령이 제거됩니다.</string>
+    <string name="command_client_removal_pending">기기를 다시 시작하여 모듈 제거를 완료하세요</string>
+    <string name="command_client_uninstalled">모듈이 제거되었습니다</string>
+    <string name="command_client_uninstall_failed">Appine 명령줄 모듈을 제거하지 못했습니다</string>
+    <string name="command_client_no_root">Root 권한이 필요합니다</string>
+    <string name="command_client_no_manager">지원되는 Root 관리자를 찾을 수 없습니다</string>
+    <string name="command_client_no_mount">KernelSU에서 시스템 마운트를 설정하세요</string>
+    <string name="command_client_mount_pending">KernelSU 마운트 모듈에 적용 대기 중인 변경 사항이 있습니다. 기기를 다시 시작한 후 시도하세요</string>
+    <string name="command_client_mount_disabled">KernelSU 마운트 모듈이 비활성화되어 있습니다. 모듈을 활성화하고 기기를 다시 시작한 후 시도하세요</string>
+    <string name="command_client_install_failed">Appine 명령줄 모듈을 설치할 수 없습니다</string>
+    <string name="command_client_copied">셸 실행 명령을 복사했습니다</string>
+    <string name="command_client_unavailable">Appine 명령줄 도구를 찾을 수 없습니다</string>
+    <string name="command_access_paused">개인정보 보호 모드에서 일시 중지</string>
+    <string name="command_permission">Appine에서 Linux 명령 실행</string>
+    <string name="command_permission_description">권한이 있는 앱은 Appine에서 명령을 실행하고 결과를 읽을 수 있습니다.</string>
 </resources>

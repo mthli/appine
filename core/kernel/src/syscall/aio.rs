@@ -590,7 +590,10 @@ mod tests {
         c.borrow_mut().polls.push(PendingPoll {
             data: 7,
             obj: 0x1000,
-            file: OpenFile::new(FileKind::Host(fds[0]), oflags::O_RDONLY),
+            file: OpenFile::new(
+                FileKind::Host(crate::fd::HostFd::Inherited(fds[0])),
+                oflags::O_RDONLY,
+            ),
             events: 1,
             resfd: Some(efd.clone()),
         });

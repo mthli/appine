@@ -31,6 +31,8 @@ pub(super) struct Io {
     fh: u64,
     flags: u32,
     stream: bool,
+    backing: Option<std::sync::Arc<fuse::BackedFile>>,
+    directory_snapshot: Option<Rc<Vec<DirEntry>>>,
 }
 
 impl Io {
@@ -43,6 +45,8 @@ impl Io {
             fh: h.fh,
             flags: h.flags,
             stream: h.open_flags & fuse::fopen::STREAM != 0,
+            backing: h.backing.clone(),
+            directory_snapshot: h.directory_snapshot.clone(),
         }
     }
 
@@ -192,6 +196,8 @@ pub(super) fn create(
                     flags: kept,
                     dir: false,
                     no_release: false,
+                    backing: None,
+                    directory_snapshot: None,
                 }
                 .counted();
                 return Ok((id, FileKind::Fuse(Box::new(h))));
@@ -511,10 +517,16 @@ pub(super) fn read(
 ) -> Result<usize, Errno> {
     let offset = if io.stream { Some(0) } else { offset };
     let start = take_pos(cx, file, offset)?;
-    let r = fuse::read(cx, io.handle(), start, buf.len()).map(|data| {
-        buf[..data.len()].copy_from_slice(&data);
-        data.len()
-    });
+    let r = io
+        .backing
+        .as_ref()
+        .and_then(|backing| backing.try_read_at(cx, &io.conn, buf, start, false))
+        .unwrap_or_else(|| {
+            fuse::read(cx, io.handle(), start, buf.len()).map(|data| {
+                buf[..data.len()].copy_from_slice(&data);
+                data.len()
+            })
+        });
     put_pos(file, offset, start, &r);
     r
 }
@@ -663,13 +675,22 @@ pub(super) fn fill_dir(cx: &mut Cx<'_>, file: &FileRef) -> Result<(), Errno> {
         match &f.kind {
             FileKind::Directory {
                 fuse: Some(h),
-                entries: None,
+                entries,
                 ..
-            } => Io::of(h),
+            } => {
+                h.check_directory()?;
+                if entries.is_some() {
+                    return Ok(());
+                }
+                Io::of(h)
+            }
             _ => return Ok(()),
         }
     };
-    let list: Vec<DirEntry> = fuse::readdir(cx, io.handle())?;
+    let list = match &io.directory_snapshot {
+        Some(entries) => entries.as_ref().clone(),
+        None => fuse::readdir(cx, io.handle())?,
+    };
     if let FileKind::Directory { entries, .. } = &mut file.borrow_mut().kind {
         *entries = Some(list);
     }
@@ -777,14 +798,22 @@ pub(super) fn flush_as(cx: &mut Cx<'_>, file: &FileRef, table: usize) -> Result<
 /// stat of FUSE node `id` (6.1's `fuse_getattr`): EACCES for a process the mount does not allow,
 /// otherwise the cached attributes (fetched again when out of date), with the instance's device
 /// number and the block size the daemon gave.
-pub(super) fn stat(vfs: &Vfs, cred: &Cred, node: &Node) -> Result<[u8; 128], Errno> {
+pub(super) fn stat(
+    vfs: &Vfs,
+    cred: &Cred,
+    node: &Node,
+    handle: Option<&Handle>,
+) -> Result<[u8; 128], Errno> {
     let Node::Fuse(_, id) = node else {
         return Err(Errno::EINVAL);
     };
     if !vfs.fuse().conn_of(*id)?.borrow().allows(cred) {
         return Err(Errno::EACCES);
     }
-    let attr = fuse::cached_attr(vfs, *id)?;
+    let attr = match handle {
+        Some(h) => fuse::opened_attr(vfs, h)?,
+        None => fuse::cached_attr(vfs, *id)?,
+    };
     let mut b = encode_stat(&attr.stat(), vfs.dev_of(node));
     if attr.blksize != 0 {
         b[56..60].copy_from_slice(&attr.blksize.to_le_bytes());
@@ -1374,27 +1403,25 @@ pub(super) fn map_fill(
     shared: bool,
     refused: bool,
 ) -> Result<Option<Rc<Fill>>, Errno> {
-    let (id, direct) = {
-        let f = file.borrow();
-        match &f.kind {
-            FileKind::Fuse(h) if f.readable() && !refused => {
-                (h.id, h.open_flags & fuse::fopen::DIRECT_IO != 0)
-            }
-            _ => return Ok(None),
-        }
+    let f = file.borrow();
+    let FileKind::Fuse(h) = &f.kind else {
+        return Ok(None);
     };
-    if direct && shared {
+    if !f.readable() || refused {
+        return Ok(None);
+    }
+    if shared && h.open_flags & fuse::fopen::DIRECT_IO != 0 {
         return Err(Errno::ENODEV);
     }
-    let size = fuse::cached_attr(&*cx.vfs()?, id)?.size;
+    let size = fuse::opened_attr(&*cx.vfs()?, h)?.size;
+    drop(f);
     let host = appine_hal::memfd(c"appine-fuse").map_err(Errno)?;
     host.set_len(size)
         .map_err(|e| Errno(e.raw_os_error().unwrap_or(Errno::EIO.0)))?;
     Ok(Some(Fill::new(host, size, file.clone())))
 }
 
-/// Reads into an on-demand mapping of a FUSE file ([`Fill`]) the pages missing around file page
-/// `page` (Linux's `filemap_fault` read-around), the BKL released while the daemon answers.
+/// Reads the pages around a FUSE mapping fault, with the BKL released during the read.
 pub(crate) fn fill(cx: &mut Cx<'_>, (fill, page): (Rc<Fill>, u64)) -> Result<(), Errno> {
     let Some(window) = fill.window(page) else {
         return Ok(());
@@ -1403,7 +1430,13 @@ pub(crate) fn fill(cx: &mut Cx<'_>, (fill, page): (Rc<Fill>, u64)) -> Result<(),
         FileKind::Fuse(h) => Io::of(h),
         _ => return Err(Errno::EIO),
     };
-    let data = fuse::read(cx, io.handle(), window.0, window.1 as usize)?;
+    let data = fuse::read_mapping(
+        cx,
+        io.handle(),
+        io.backing.as_deref(),
+        window.0,
+        window.1 as usize,
+    )?;
     fill.store(window, &data)
 }
 

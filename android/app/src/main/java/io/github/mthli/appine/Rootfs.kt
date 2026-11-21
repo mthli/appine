@@ -508,6 +508,20 @@ netns = "host"
         Native.writeFile(store, path, asset(context, "xdg-open.sh").toByteArray(), 493 /* 0755 */, replace)
     }
 
+    /** Stages the APK's static sharing helper for the guest, including stores created with an older APK. */
+    internal fun ensureShareClient(context: Context) {
+        val helper = File(context.applicationInfo.nativeLibraryDir, "libappine-share.so")
+        val data = helper.readBytes()
+        val store = store(context).path
+        val digest = hex(MessageDigest.getInstance("SHA-256").digest(data))
+        val marker = "/var/cache/appine/share-client"
+        val previous = Native.readFile(store, marker)?.decodeToString()
+        if (previous == digest &&
+            runCatching { Native.browseStat(store, AndroidShare.HELPER) }.getOrNull() != null) return
+        Native.writeFile(store, AndroidShare.HELPER, data, 493 /* 0755 */, true)
+        write(store, marker, digest)
+    }
+
     /**
      * On Alpine, puts the doas package bundled with the app into the store
      * (`/var/cache/appine/doas.apk`): the login script installs it offline when a regular user

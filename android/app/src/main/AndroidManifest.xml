@@ -19,6 +19,12 @@
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <!-- localeConfig enables the system language picker on Android 13+; older versions ignore it. -->
+    <permission
+            android:name="${applicationId}.permission.RUN_COMMAND"
+            android:label="@string/command_permission"
+            android:description="@string/command_permission_description"
+            android:protectionLevel="dangerous" />
+
     <application
             android:name=".MainApplication"
             android:icon="@mipmap/ic_launcher"
@@ -102,6 +108,19 @@
                 <action android:name="android.content.action.DOCUMENTS_PROVIDER" />
             </intent-filter>
         </provider>
+
+        <activity
+                android:name=".CommandStartActivity"
+                android:theme="@android:style/Theme.NoDisplay"
+                android:excludeFromRecents="true"
+                android:noHistory="true"
+                android:taskAffinity=""
+                android:exported="true" />
+
+        <service
+                android:name=".ExecCommandService"
+                android:exported="true"
+                android:permission="${applicationId}.permission.RUN_COMMAND" />
 
         <!-- The android/service map: a specialUse foreground service is kept while sessions run -->
         <service

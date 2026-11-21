@@ -5,7 +5,7 @@
 >
 > Verified: 2026-11-14 (split out of the kernel/process full mapping of 2026-11-10; the boundary was checked against the source at the split)
 >
-> Maintained: 2026-11-15 (targeted verification only since the full mapping; latest change: repoint dependencies to the split module maps)
+> Maintained: 2026-11-19 (targeted verification only since the full mapping; latest change: redirected stdio jobs and one-shot watch entries)
 
 ## Responsibilities
 
@@ -32,7 +32,7 @@ namespace creation (`kernel/ns`); console and terminal bridge behaviour (`kernel
 - `Machine` owns one `Shared` kernel and the timer-thread and watchdog handles; dropping it
   ends the guest processes and joins/stops those workers.
 - `MachineOptions` supplies the tier, store, memory limit, low-port policy and initial exception
-  tracing; `Stdio` chooses host stdio or a console for a spawned process.
+  tracing; `Stdio` chooses inherited stdio, redirected host descriptors or a console.
 - `inittab::Entry` describes an action and its runlevels; `Power` is reboot, halt or poweroff.
 - The virtual init is the `INIT` thread group, with no guest thread. `Kernel::init_handlers`
   enables its power requests; `power` holds the first pending request; `stopping` interrupts
@@ -58,6 +58,10 @@ namespace creation (`kernel/ns`); console and terminal bridge behaviour (`kernel
 - Host-launched processes bypass `RLIMIT_NPROC` and `threads-max` by design; guest clone checks
   remain in `kernel/process`. Loading uses `kernel/exec`'s `loader::load`, and actual task and
   host-thread creation uses `kernel/process`'s `task::start`.
+
+- Redirected jobs install the supplied owned descriptors and get an independent process group
+  and session. A one-shot wait consumes the job's watched exit status. Cancellation checks
+  that the watch still refers to a live job before signalling its group.
 
 ### PID 1, boot and shutdown
 

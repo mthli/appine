@@ -16,6 +16,7 @@
 
 use std::ffi::OsStr;
 use std::io;
+use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -28,7 +29,7 @@ use appine_hal::Event;
 use crate::cell::RefCell;
 use crate::cred::Cred;
 use crate::errno::Errno;
-use crate::fd::FdTable;
+use crate::fd::{FdTable, FileKind, HostFd, OpenFile, oflags};
 use crate::kernel::{INIT, Kernel, Shared, block, block_for, request_wake, wake};
 use crate::loader::{self, Args, Executable};
 use crate::mm::Mm;
@@ -71,10 +72,12 @@ pub struct MachineOptions {
 }
 
 /// stdin/stdout/stderr of a new process.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum Stdio {
     /// The host process's own 0, 1 and 2.
     Host,
+    /// Private host file descriptors for this process. Clones keep them alive across fork and dup.
+    Redirect([OwnedFd; 3]),
     /// The slave of a console (by PTY number): the process becomes the leader of a new session,
     /// and the console is its controlling terminal.
     Console(u32),
@@ -323,6 +326,23 @@ impl Machine {
         let mut console = None;
         let fds = match stdio {
             Stdio::Host => FdTable::with_host_stdio(),
+            Stdio::Redirect(fds) => {
+                group.pgid = tid;
+                group.sid = tid;
+                let mut table = FdTable::new();
+                for (index, fd) in fds.into_iter().enumerate() {
+                    let mode = if index == 0 {
+                        oflags::O_RDONLY
+                    } else {
+                        oflags::O_WRONLY
+                    };
+                    let file = OpenFile::new(FileKind::Host(HostFd::Owned(Rc::new(fd))), mode);
+                    table
+                        .install_at(index as i32, file, false)
+                        .map_err(io_err)?;
+                }
+                table
+            }
             Stdio::Console(id) => {
                 let attached = k.consoles.get(&id).is_some_and(|c| c.attached);
                 let (slave, tty) = terminal::attach(&mut k, id, tid).map_err(RunError::Console)?;
@@ -407,15 +427,30 @@ impl Machine {
     /// Reads the console's output, waiting when there is none. Returns 0 when the session has
     /// ended: every slave is closed and the output has all been read.
     pub fn read_console(&self, id: u32, buf: &mut [u8]) -> Result<usize, Errno> {
+        self.read_console_until(id, buf, None)
+            .map(|result| result.expect("waited without a deadline"))
+    }
+
+    /// Like read_console, with an optional deadline. None means no output arrived by the deadline.
+    pub fn read_console_until(
+        &self,
+        id: u32,
+        buf: &mut [u8],
+        deadline: Option<std::time::Instant>,
+    ) -> Result<Option<usize>, Errno> {
         let objects = terminal::wake_objects(&self.shared.lock(), id);
-        let out = self.wait_objects(wake::FILE, objects.as_deref(), |k| {
-            on_console(k, id, "Machine::read_console", |k| {
-                terminal::take_output(k, id, buf.len())
+        let out = self
+            .wait_deadline(wake::FILE, objects.as_deref(), deadline, |k| {
+                on_console(k, id, "Machine::read_console", |k| {
+                    terminal::take_output(k, id, buf.len())
+                })
+                .transpose()
             })
-            .transpose()
-        })?;
-        buf[..out.len()].copy_from_slice(&out);
-        Ok(out.len())
+            .transpose()?;
+        Ok(out.map(|out| {
+            buf[..out.len()].copy_from_slice(&out);
+            out.len()
+        }))
     }
 
     /// As [`Machine::read_console`], but reads only up to where the output's writer changes
@@ -437,11 +472,22 @@ impl Machine {
     /// Writes input to the console (through the line discipline), waiting while the input queue is
     /// full. Returns the number of bytes written; EIO if the session has already ended.
     pub fn write_console(&self, id: u32, data: &[u8]) -> Result<usize, Errno> {
+        self.write_console_until(id, data, None)
+            .map(|result| result.expect("waited without a deadline"))
+    }
+
+    /// Like write_console, with an optional deadline for room to become available.
+    pub fn write_console_until(
+        &self,
+        id: u32,
+        data: &[u8],
+        deadline: Option<std::time::Instant>,
+    ) -> Result<Option<usize>, Errno> {
         if data.is_empty() {
-            return Ok(0);
+            return Ok(Some(0));
         }
         let objects = terminal::wake_objects(&self.shared.lock(), id);
-        self.wait_objects(wake::FILE, objects.as_deref(), |k| {
+        self.wait_deadline(wake::FILE, objects.as_deref(), deadline, |k| {
             on_console(k, id, "Machine::write_console", |k| {
                 let room = terminal::input_room(k, id)?;
                 if room > 0 {
@@ -456,6 +502,7 @@ impl Machine {
             })
             .transpose()
         })
+        .transpose()
     }
 
     /// The console's window size changed: the foreground process group gets SIGWINCH.
@@ -519,6 +566,28 @@ impl Machine {
         })
     }
 
+    /// Waits for the one host consumer of this process, then releases its watch entry.
+    pub fn wait_once(&self, pid: u32) -> Option<ExitStatus> {
+        self.wait_on(wake::WATCHED, |k| match k.watched.get(&(pid as i32)) {
+            Some(Some(status)) => {
+                let status = *status;
+                k.watched.remove(&(pid as i32));
+                Some(Some(status))
+            }
+            None => Some(None),
+            Some(None) => None,
+        })
+    }
+
+    /// Terminates a host-started job only while its watch entry still represents a live process.
+    pub fn cancel_watched(&self, pid: u32) {
+        let k = self.shared.lock();
+        let pid = pid as i32;
+        if matches!(k.watched.get(&pid), Some(None)) {
+            signal::send_to_pgrp(&k, pid, Signal::KILL, crate::signal::SigInfo::kernel());
+        }
+    }
+
     /// Returns how a process started by [`Machine::spawn`] ended, if it has.
     pub fn try_wait(&self, pid: u32) -> Option<ExitStatus> {
         self.shared
@@ -565,6 +634,18 @@ impl Machine {
         crate::bug::host_call("Machine::set_routes", || {
             self.shared.lock().host_routes = routes;
         });
+    }
+
+    /// Registers or revokes the backing for a read-only share source on this machine.
+    pub fn set_fuse_backing(
+        &self,
+        source: String,
+        backing: Option<Arc<dyn crate::FuseBacking>>,
+    ) -> bool {
+        let k = self.shared.lock();
+        let Some(vfs) = &k.vfs else { return false };
+        vfs.fuse_mut().set_backing(source.into_bytes(), backing);
+        true
     }
 
     /// Commits the inode store's deferred write transactions (when the app goes to the background,

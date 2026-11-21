@@ -2,6 +2,8 @@ package io.github.mthli.appine
 
 import android.content.Context
 import androidx.core.content.edit
+import org.json.JSONArray
+import org.json.JSONObject
 
 /** Persisted screen-off policy; the notification remembers the last non-ALWAYS choice. */
 internal enum class RunPolicy(val value: String, val label: Int, val summary: Int) {
@@ -22,6 +24,10 @@ internal object Settings {
     private const val KEY_KEEP_AWAKE = "keep_awake"
     private const val KEY_RUN_POLICY = "run_policy"
     private const val KEY_IDLE_POLICY = "idle_policy"
+    private const val KEY_ANDROID_SHARE = "android_share"
+    private const val KEY_ANDROID_SHARES = "android_shares"
+    private const val KEY_TERMINAL_ACCESS = "terminal_access"
+    private const val KEY_COMMAND_CLIENT_MODULE_KNOWN = "command_client_module_known"
     private const val KEY_FILE_ACCESS = "file_access"
     private const val KEY_PRIVACY_MODE = "privacy_mode"
     private const val KEY_FILL_WIDE = "fill_wide"
@@ -83,6 +89,54 @@ internal object Settings {
      * enabling file access now requires confirmation of the sensitive-file warning.
      */
     fun fileAccess(context: Context): Boolean = !privacyMode(context) && prefs(context).getBoolean(KEY_FILE_ACCESS, false)
+
+    internal fun androidShares(context: Context): List<AndroidShare.Config> {
+        val settings = prefs(context)
+        val saved = settings.getString(KEY_ANDROID_SHARES, null)
+        if (saved == null) {
+            val old = AndroidShare.decode(settings.getString(KEY_ANDROID_SHARE, null)) ?: return emptyList()
+            return listOf(AndroidShare.Config(old, "/mnt/appine-android"))
+        }
+        val array = runCatching { JSONArray(saved) }.getOrNull() ?: return emptyList()
+        return buildList {
+            for (i in 0 until array.length()) {
+                val item = array.optJSONObject(i) ?: continue
+                val source = AndroidShare.decode(item.optString("source")) ?: continue
+                val target = AndroidShare.normalizeTarget(item.optString("target")) ?: continue
+                if (none { existing -> AndroidShare.targetsConflict(existing.target, target) }) {
+                    add(AndroidShare.Config(source, target))
+                }
+            }
+        }
+    }
+
+    internal fun setAndroidShares(context: Context, shares: List<AndroidShare.Config>) = prefs(context).edit {
+        val array = JSONArray()
+        for (share in shares) {
+            array.put(JSONObject().put("source", share.source.saved).put("target", share.target))
+        }
+        putString(KEY_ANDROID_SHARES, array.toString())
+        remove(KEY_ANDROID_SHARE)
+    }
+
+    fun terminalAccessEnabled(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_TERMINAL_ACCESS, false)
+
+    fun terminalAccess(context: Context): Boolean =
+        terminalAccessEnabled(context) && !privacyMode(context)
+
+    fun setTerminalAccess(context: Context, enabled: Boolean) = prefs(context).edit {
+        putBoolean(KEY_TERMINAL_ACCESS, enabled)
+        // An older pairing grant never enables the device-wide switch.
+        remove("external_command_key")
+    }
+
+    fun commandClientModuleKnown(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_COMMAND_CLIENT_MODULE_KNOWN, false)
+
+    fun setCommandClientModuleKnown(context: Context, known: Boolean) = prefs(context).edit {
+        putBoolean(KEY_COMMAND_CLIENT_MODULE_KNOWN, known)
+    }
 
     fun privacyMode(context: Context): Boolean = prefs(context).getBoolean(KEY_PRIVACY_MODE, false)
 

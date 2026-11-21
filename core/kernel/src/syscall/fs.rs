@@ -1007,7 +1007,7 @@ fn reopen(
             accmode != oflags::O_WRONLY,
             accmode != oflags::O_RDONLY,
         ))),
-        FileKind::Host(fd) => Ok(FileKind::Host(*fd)),
+        FileKind::Host(fd) => Ok(FileKind::Host(fd.clone())),
         _ => Err(Errno::ENXIO),
     }
 }
@@ -2305,7 +2305,7 @@ pub(super) fn ioctl(cx: &mut Cx<'_>, fd: i32, request: u32, arg: u64) -> SysResu
         _ => {}
     }
     let host_fd = match &file.borrow().kind {
-        FileKind::Host(fd) => *fd,
+        FileKind::Host(fd) => fd.raw(),
         FileKind::Pipe(end) if request == FIONREAD => {
             let n = end.pipe.borrow().buf.len() as i32;
             return put(cx, arg, n.to_le_bytes()).map(|()| 0);
@@ -4626,7 +4626,7 @@ pub(super) fn seekable(f: &OpenFile) -> bool {
 
 fn io_path(f: &OpenFile) -> IoPath {
     match &f.kind {
-        FileKind::Host(fd) => IoPath::Host(*fd),
+        FileKind::Host(fd) => IoPath::Host(fd.raw()),
         FileKind::Pipe(end) => IoPath::Pipe(end.pipe.clone()),
         FileKind::Pty(end) => IoPath::Pty(end.tty.clone(), (end.master, end.born)),
         FileKind::Socket(s) => IoPath::Socket(s.clone()),
@@ -5071,7 +5071,9 @@ pub(super) fn lseek(cx: &mut Cx<'_>, fd: i32, offset: i64, whence: u32) -> SysRe
     let mut f = file.borrow_mut();
     let OpenFile { kind, pos, .. } = &mut *f;
     let base = match kind {
-        FileKind::Host(fd) => return appine_hal::lseek(*fd, offset, whence as i32).map_err(Errno),
+        FileKind::Host(fd) => {
+            return appine_hal::lseek(fd.raw(), offset, whence as i32).map_err(Errno);
+        }
         FileKind::Path(_) => return Err(Errno::EBADF),
         FileKind::Pipe(_)
         | FileKind::Pty(_)
@@ -5821,7 +5823,7 @@ fn node_stat(cx: &Cx<'_>, node: &Node) -> Result<[u8; 128], Errno> {
     match node {
         Node::Store(_, ino) => Ok(encode_stat(&vfs.store().stat(*ino)?, vfs.dev_of(node))),
         Node::Overlay(_, o) => Ok(encode_stat(&vfs.overlay_stat(*o)?, vfs.dev_of(node))),
-        Node::Fuse(..) => super::fuse::stat(&vfs, &cx.cred(), node),
+        Node::Fuse(..) => super::fuse::stat(&vfs, &cx.cred(), node, None),
         // Namespaces are in nsfs
         Node::Pseudo(_, p @ PseudoNode::NsFile(..)) => {
             Ok(encode_stat(&pseudo::stat(&view, p)?, Fs::Nsfs.dev()))
@@ -5871,7 +5873,7 @@ pub(super) fn file_stat(cx: &Cx<'_>, file: &FileRef) -> Result<[u8; 128], Errno>
         encode_stat(&st, dev)
     };
     match &f.kind {
-        FileKind::Host(fd) => host_stat(*fd),
+        FileKind::Host(fd) => host_stat(fd.raw()),
         FileKind::Pipe(end) => match end.pipe.borrow().fifo {
             Some(ino) => {
                 let vfs = cx.vfs()?;
@@ -5933,6 +5935,11 @@ pub(super) fn file_stat(cx: &Cx<'_>, file: &FileRef) -> Result<[u8; 128], Errno>
                 st.ino = vfs.overlay().shown_ino(o);
             }
             Ok(encode_stat(&st, dev))
+        }
+        FileKind::Fuse(handle) => {
+            let vfs = cx.vfs()?;
+            let node = Node::Fuse(f.mnt, handle.id);
+            super::fuse::stat(&vfs, &cx.cred(), &node, Some(handle))
         }
         _ => {
             let node = f.node().ok_or(Errno::EBADF)?;
