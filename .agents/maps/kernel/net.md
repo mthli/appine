@@ -5,7 +5,7 @@
 >
 > Verified: 2026-11-26 (full refresh: 5 research concerns; 18 claims checked by an independent verifier — 18 confirmed, 0 partial, 0 refuted, plus 6 map-audit refinements and 4 additional confirmed bugs folded in)
 >
-> Maintained: 2026-11-27 (targeted verification only since the full mapping; latest change: per-thread `NetScratch` buffer reuse, direct `RecvSink::Scatter` delivery, optional-addr/control HAL recv, and zero-copy hot-page `SOCK_STREAM` iovec fast path)
+> Maintained: 2026-11-27 (targeted verification only since the full mapping; latest change: in-place condensation with no mapped claim changes)
 
 ## Responsibilities
 
@@ -19,22 +19,19 @@ helpers, netlink section and `Socket::Netlink` arms, and `kernel/rawicmp`’s `r
 
 ## Key types
 
-- `Socket::{Inet,Netlink,Unix}` lives in `FileKind::Socket` as a `SocketRef` (`Rc<RefCell<Socket>>`).
-  Socket, open file and fd entry hold inode uid/gid, O_NONBLOCK and CLOEXEC respectively.
-- `InetSocket` holds the host fd/type, family, guest protocol, raw flag and endpoint state. `net == None`
-  denotes the initial namespace. `listener` is a binding id, including for accepted children. `peer`
-  records a datagram peer and `guest_peer` the guest connect address.
-- `Routed` carries one route’s host mapping, verdict and original destinations. Optional `Track` retains
-  NAT, verdict, peer and mark state. `DeferredListen` stores backlog, guest reuse and private forwarding
-  listener. `fwd` holds the registration.
-- `SockOpts` holds common Unix/netlink options. `MsgHdr` represents imported iovecs and pointers.
-  `Message` separates copied bytes from reported length and carries source, controls, flags and pending
-  Unix rights. `NetScratch` is a per-thread RAII guard (`Cell<Vec<u8>>`, 4 KiB minimum, 256 KiB
-  retention cap, transient fallback for >256 KiB or re-entrancy) reused across `recv`/`recv_with`,
-  `sendto`, `sendmsg` and `rw`. `RecvSink::Scatter` scatters inet payloads directly from `NetScratch`
-  into guest iovecs without an intermediate `Message::data` copy.
-- `PortMap` tracks live and released ports (`Lease`) and queues `ListenEvent`. `Traffic` stores `IfStats`,
-  address cache and `Protocols`. `origdst::Table` indexes namespace-specific destinations by host tuple.
+- `Socket::{Inet,Netlink,Unix}` in `FileKind::Socket` as `SocketRef` (`Rc<RefCell<Socket>>`); socket,
+  open file, fd entry hold inode uid/gid, O_NONBLOCK, CLOEXEC respectively.
+- `InetSocket`: host fd/type, family, guest proto, raw flag, endpoint state (`net == None` = initial ns;
+  `listener` = binding id incl. accepted children; `peer` = dgram peer, `guest_peer` = guest connect addr).
+- `Routed`: host mapping, verdict, origdsts; optional `Track`: NAT, verdict, peer, mark. `DeferredListen`:
+  backlog, guest reuse, private forwarding listener; `fwd`: forwarder registration.
+- `SockOpts` (Unix/netlink opts); `MsgHdr` (imported iovecs/ptrs); `Message` (copied bytes vs reported len,
+  source, controls, flags, pending Unix rights). `NetScratch`: per-thread RAII guard (`Cell<Vec<u8>>`, 4
+  KiB min, 256 KiB retention cap, transient fallback >256 KiB or re-entrancy) reused by `recv`/`recv_with`,
+  `sendto`, `sendmsg`, `rw`; `RecvSink::Scatter` scatters inet payloads from `NetScratch` directly into
+  guest iovecs (no `Message::data` copy).
+- `PortMap` (live/released `Lease`, queued `ListenEvent`); `Traffic` (`IfStats`, addr cache, `Protocols`);
+  `origdst::Table` (ns destinations keyed by host tuple).
 
 ## Public entry points
 
@@ -108,36 +105,32 @@ listens with the saved backlog. Failure tries to restore private listen, disable
 
 ### Connect and names
 
-Retained RET 0 rejects connect (`EOPNOTSUPP`). Stub connect returns early. `route` applies OUTPUT NAT and
-host translation, then applicable bridge/endpoint PREROUTING and path filters for TCP/MPTCP or UDP. A NAT
-block ends hook evaluation. Port-only bridge DNAT preserves the L2 path. The flow carries guest source
-port, caller euid/egid, mark, original destinations and seen-peer UDP reply state. IPv4 path filtering
-clears the mark across namespaces.
+Retained RET 0 rejects connect (`EOPNOTSUPP`); stub connect returns early. `route` runs OUTPUT NAT, host
+translation, applicable bridge/endpoint PREROUTING and TCP/MPTCP or UDP path filters (NAT block ends hook
+eval; port-only bridge DNAT keeps L2 path; flow carries guest src port, caller euid/egid, mark, origdsts,
+seen-peer UDP reply state; IPv4 path filter clears mark across namespaces).
 
-Isolated streams give `ECONNREFUSED`. Isolated UDP records a silently blocked peer and disconnects the
-host, trying to keep the local port. Other isolated protocols give `ENETUNREACH`. A stream reject returns
-its errno. A drop redirects to a full-backlog kernel blackhole listener or gives `ETIMEDOUT` if unavailable,
-skipping normal source bind, destination port translation, counters and original-destination
-registration (the shared success/EINPROGRESS path can still claim an eligible new-namespace ephemeral
-source port). A new-namespace stream target without a matching listener gives `ECONNREFUSED`.
+Isolated streams → `ECONNREFUSED`, isolated UDP records silently blocked peer and disconnects host (trying
+to keep local port), other isolated protos → `ENETUNREACH`. Stream reject returns its errno; drop redirects
+to full-backlog kernel blackhole listener (`ETIMEDOUT` if unavailable), skipping normal src bind, dest port
+translation, counters and origdst registration (shared success/`EINPROGRESS` path can still claim eligible
+new-ns ephemeral src port). New-ns stream targets without matching listener → `ECONNREFUSED`.
 
-`ensure_bound` selects a namespace source or permits host autobind. A self-directed UDP source can
-register a return port. Destination resolution uses the target namespace binding or initial port map. A
-wide datagram socket connecting to a mapped namespace peer leaves the host disconnected and saves `vconn`.
-AF_UNSPEC undoes that connection. UDP can retain the verdict and a weak target for later sends.
+`ensure_bound` picks ns src or allows host autobind; self-directed UDP src can register return port. Dest
+uses target ns binding or initial port map. Wide dgram connecting to mapped ns peer leaves host
+disconnected and saves `vconn` (AF_UNSPEC undoes it). UDP may keep verdict + weak target for later sends.
 
-Host success or `EINPROGRESS` can claim an ephemeral port and register an original destination before any
-blocking wait. Nonblocking returns the host result. Blocking `EINPROGRESS` and repeated `EALREADY` wait
-for POLLOUT. SO_SNDTIMEO expiry returns the original progress errno and leaves connect running.
-Interruption gives `ERESTARTSYS` without a timeout (`SA_RESTART` can re-enter) or `EINTR` with one. On
-readiness the kernel reads SO_ERROR and calls host connect again on either outcome to consume host
-connecting state. The guest receives the saved result.
+Host success/`EINPROGRESS` may claim ephemeral port and register origdst before wait. Nonblocking returns
+host result; blocking `EINPROGRESS` and repeated `EALREADY` wait on POLLOUT (SO_SNDTIMEO expiry returns
+original progress errno while connect runs; signal → `ERESTARTSYS` without timeout so SA_RESTART can
+re-enter, `EINTR` with one). On ready, kernel reads SO_ERROR and re-calls host connect on either outcome to
+consume host connecting state, returning saved result.
 
-`connected_peer` maps IPv4 on IPv6, resolves an IPv4 wildcard to bound IPv4 or loopback, and an IPv6
-wildcard to ::1 or its mapped local counterpart. It clears IPv6 flow info and retains scope only for
-link-local. Name queries account for the stub, tapped/blocked UDP and virtual peers. `inet_name` restores
-local ports and namespace addresses, uses cached guest/outside peer after successful host peer query, and
-can choose a virtual local endpoint toward the peer. A raw socket reports its protocol as its local port.
+`connected_peer` maps IPv4 on IPv6, resolves IPv4 wildcard to bound IPv4/loopback and IPv6 wildcard to ::1
+or mapped local counterpart, clears IPv6 flow info and keeps scope only for link-local. Name queries handle
+stub, tapped/blocked UDP and virtual peers. `inet_name` restores local ports/ns addrs, uses cached
+guest/outside peer after successful host peer query and can pick virtual local endpoint toward peer; raw
+sockets report protocol as local port.
 
 ### Accept, shutdown and release
 
@@ -166,60 +159,52 @@ and forwarding handle.
 
 ### Send and receive
 
-`read_msghdr` imports 56 bytes. More than 1024 iovecs gives `EMSGSIZE`. It rejects signed-negative lengths
-(`EINVAL`) during import, then range-checks each original extent against 2^48 (`EFAULT`) before shortening
-the total to `MAX_RW_COUNT` (0x7fff_f000). `sendto`/`sendmsg` gather up to 1 MiB (`MSG_MAX`). Guest
-ancillary space is capped at 4096 bytes each way, zero for a null receive control pointer.
+`read_msghdr` imports 56 B (>1024 iovecs → `EMSGSIZE`), rejecting negative lengths (`EINVAL`) during
+import, checking each original extent <2^48 (`EFAULT`), clamping total to `MAX_RW_COUNT` (0x7fff_f000).
+`sendto`/`sendmsg` gather ≤1 MiB (`MSG_MAX`); ancillary caps at 4096 B each way (0 for null recv ctrl ptr).
 
-After Unix/netlink dispatch, `inet_send_addr` validates explicit nonstream and FASTOPEN destinations
-before DNS or routing. Ordinary streams ignore the destination. IPv4 needs 16 bytes, accepts AF_INET and
-rewrites AF_UNSPEC for datagrams except nonraw ICMP. Short input gives `EINVAL`, wrong family
-`EAFNOSUPPORT`. IPv6 nonraw datagrams except ICMPv6 accept AF_INET6 from 24 bytes, AF_INET from 16 unless
-v6-only (`ENETUNREACH`), and AF_UNSPEC as no destination. Other invalid input gives `EINVAL` there.
-Remaining IPv6 sends need 24 bytes and AF_INET6, with a raw AF_UNSPEC rewrite. FASTOPEN under retained RET
-0 gives `EOPNOTSUPP`.
+After Unix/netlink dispatch, `inet_send_addr` validates explicit nonstream/FASTOPEN dests before
+DNS/routing (ordinary streams ignore dest). IPv4 needs 16 B, accepts AF_INET, rewrites AF_UNSPEC for
+dgrams except nonraw ICMP (short → `EINVAL`, wrong family → `EAFNOSUPPORT`). IPv6 nonraw dgrams except
+ICMPv6 accept AF_INET6 ≥24 B, AF_INET ≥16 B unless v6-only (`ENETUNREACH`), AF_UNSPEC as no dest (other
+invalid → `EINVAL`); remaining IPv6 sends need 24 B + AF_INET6 (raw rewrites AF_UNSPEC). FASTOPEN under
+retained RET 0 → `EOPNOTSUPP`.
 
-Address-less UDP honors its saved verdict and re-resolves any namespace target. A missing listener drops
-the send with success. `update_udp_peer` updates `vconn` in place, or for host-connected sockets skips
-peer verification when `peer_map` matches, `ttl_set` is false and the target namespace reports
-`unique_udp_host_ip`, otherwise verifies the host peer and reconnects on mismatch (clearing `peer_map`
-and returning any host reconnect error). For addressed
-datagrams blocked OUTPUT gives `EPERM`, later drops/rejects return the byte count. Isolated UDP and
-missing namespace listeners drop silently. Reverse DNAT history holds 16 pairs. Wide/initial wildcard
-sources can append IP_PKTINFO/IPV6_PKTINFO unless supplied. Raw and tapped UDP call `before_io`, drain tap
-errors and may retry a host ICMP failure once. Raw uses `RawIcmp::send` per attempt.
+Address-less UDP honors saved verdict and re-resolves ns target (missing listener drops with success).
+`update_udp_peer` updates `vconn` in place, or on host-connected sockets skips peer verification when
+`peer_map` matches, `!ttl_set` and target ns reports `unique_udp_host_ip`, else verifies host peer and
+reconnects on mismatch (clearing `peer_map`, returning reconnect error). Addressed dgrams: blocked OUTPUT →
+`EPERM`, later drops/rejects return byte count; isolated UDP and missing ns listeners drop silently.
+Reverse DNAT history holds 16 pairs; wide/initial wildcard srcs may append IP_PKTINFO/IPV6_PKTINFO unless
+supplied. Raw/tapped UDP call `before_io`, drain tap errors and may retry host ICMP failure once; raw uses
+`RawIcmp::send` per attempt.
 
-Host send strips guest DONTWAIT/NOSIGNAL and HAL adds MSG_NOSIGNAL. For hot-page `SOCK_STREAM`
-calls without `MSG_PEEK`/`MSG_ERRQUEUE`/`MSG_TRUNC`/`MSG_WAITALL`/`MSG_FASTOPEN`,
-`try_direct_send_inet` / `try_direct_recv_inet` translate up to 64 coalesced already-mapped
-soft-MMU spans (`translate_iovecs`) under the BKL and issue direct `hal::net::{sendmsg,recvmsg}_iov`,
-falling back cleanly to `NetScratch` on cold, CoW, FUSE or unmapped pages. Ordinary inet receives
-use `hal::net::recvmsg_opt` (skipping address/control allocations when unused) and scatter directly
-from `NetScratch` via `RecvSink::Scatter` (distinguishing socket errors from scatter faults so
-`recv_rest` never records `EFAULT` in `pending_err`). Blocking stream sends loop. On host
-`EAGAIN`, `wait_host` tests nonblocking, deadline, then interruption (`EAGAIN`, `EAGAIN`, `ERESTARTSYS`)
-before waiting on POLLOUT and the socket. Errors after progress return a partial count. Initial host
-`EPIPE` raises guest SIGPIPE unless suppressed. A successful datagram send can claim an autobound port.
+Host send strips guest DONTWAIT/NOSIGNAL (HAL adds MSG_NOSIGNAL). For hot-page SOCK_STREAM without
+MSG_PEEK/MSG_ERRQUEUE/MSG_TRUNC/MSG_WAITALL/MSG_FASTOPEN, `try_direct_send_inet`/`try_direct_recv_inet`
+translate ≤64 coalesced mapped soft-MMU spans (`translate_iovecs`) under BKL and call
+`hal::net::{sendmsg,recvmsg}_iov`, falling back to `NetScratch` on cold/CoW/FUSE/unmapped pages. Ordinary
+inet recv uses `hal::net::recvmsg_opt` (skipping unused addr/ctrl allocs) and scatters from `NetScratch`
+via `RecvSink::Scatter` (separating socket errors from scatter faults so `recv_rest` never saves `EFAULT`
+in `pending_err`). Blocking stream sends loop; on host `EAGAIN`, `wait_host` checks nonblocking, deadline,
+signal (`EAGAIN`, `EAGAIN`, `ERESTARTSYS`) before POLLOUT+socket wait. Errors after progress return partial
+count; initial host `EPIPE` raises guest SIGPIPE unless suppressed; successful dgram send may claim
+autobound port.
 
-Unix, netlink and raw ICMP have family-specific receive paths. Ordinary inet checks the stub FIFO, a saved
-error for a non-ERRQUEUE read, then UDP tap errors. ERRQUEUE implies nonblocking. Host receive strips
-DONTWAIT/WAITALL. `vconn` discards foreign datagrams even on peek. Source translation undoes
-port/namespace mapping and DNAT. Up to 16 observed datagram peers support reply classification. Host
-ancillary bytes and flags accompany the result. On host `EAGAIN`, recheck stub answers. With `rd_shut` and
-an empty datagram queue, blocking recv returns zero before timeout or signal, nonblocking gives `EAGAIN`.
-Other waits use POLLIN and the same ordering as send.
+Unix/netlink/raw ICMP have family-specific recv paths. Ordinary inet checks stub FIFO, saved error
+(non-ERRQUEUE), then UDP tap errors; ERRQUEUE implies nonblocking; host recv strips DONTWAIT/WAITALL.
+`vconn` discards foreign dgrams even on peek. Src translation undoes port/ns mapping and DNAT; ≤16 observed
+dgram peers aid reply classification; host controls/flags pass through. On host `EAGAIN`, recheck stub
+answers; with `rd_shut` + empty dgram queue, blocking recv returns 0 before timeout/signal while
+nonblocking returns `EAGAIN`; other waits use POLLIN with send's ordering.
 
-Inet stream `MSG_WAITALL` accumulates until full, EOF, error or unsuccessful wait. Partial progress
-survives interruption even under SA_RESTART. A consumed host error after partial progress goes into
-`pending_err`. Ordinary receive, stream send or SO_ERROR can consume it once. Poll reports POLLIN|POLLERR
-and the host fd without clearing it. Stream MSG_TRUNC returns a length without copying payload. Datagram
-MSG_TRUNC returns the backend's message length, which can exceed the copied prefix.
-
-`MSG_PEEK|MSG_WAITALL` rereads the queue head. `wait_peek` temporarily sets host SO_RCVLOWAT to the
-requested length and attempts to restore it afterward. No growth after a ready poll returns the prefix.
-For non-peeking stream WAITALL beyond 1 MiB, recvfrom/recvmsg use `recv_rest` to scatter at successive
-offsets until a short piece, without further control data. Each receive starts its own timeout deadline. A
-later hard receive error is saved.
+Inet stream MSG_WAITALL accumulates until full, EOF, error or failed wait (partial progress survives
+interruption even under SA_RESTART). Consumed host errors after progress go to `pending_err` (consumed once
+by ordinary recv, stream send or SO_ERROR; poll reports POLLIN|POLLERR + host fd without clearing). Stream
+MSG_TRUNC returns len without payload copy; dgram MSG_TRUNC returns backend len (may exceed copied prefix).
+MSG_PEEK|MSG_WAITALL rereads queue head: `wait_peek` temporarily sets host SO_RCVLOWAT to requested len and
+tries to restore it; no growth after ready poll returns prefix. Non-peeking stream WAITALL >1 MiB uses
+`recv_rest` to scatter at successive offsets until short piece without further controls (fresh timeout per
+recv; later hard recv error saved).
 
 ### File I/O, batches and copy faults
 
@@ -245,54 +230,48 @@ install only after output header writes succeed, honoring MSG_CMSG_CLOEXEC.
 
 ### Socket options
 
-Setters resolve the fd and copy up to 256 option bytes. Getters reject negative room (`EINVAL`) and cap
-ordinary host reads at 256. SO_RCVTIMEO/SO_SNDTIMEO and SO_RCVTIMEO_NEW/SO_SNDTIMEO_NEW use the same two
-signed 64-bit fields for all families. Short timeval gives `EINVAL`, invalid microseconds outside 0–999999
-give `EDOM` before the seconds check. Negative seconds mean immediate expiry. Zero duration and values ≥
-KTIME_MAX mean unlimited. Both read back as zero.
+Setters resolve fd and copy ≤256 B; getters reject negative room (`EINVAL`) and cap ordinary host reads
+at 256 B. SO_RCVTIMEO/SO_SNDTIMEO and *_NEW share two signed 64-bit fields across families: short timeval
+→ `EINVAL`, usec outside 0–999999 → `EDOM` before sec check, negative sec → immediate expiry, 0 or
+≥KTIME_MAX → unlimited (both read back 0).
 
-Unix/netlink `SockOpts` defaults both buffers to 212992. Plain requests compare unsigned, cap there and
-double (minima 4608 send/2304 receive). FORCE requires initial-user-namespace CAP_NET_ADMIN (`EPERM`),
-clamps to 0..INT_MAX/2 then doubles with the same floors. DEBUG enable needs that capability (`EACCES`).
-Priority outside 0–6 needs CAP_NET_RAW or NET_ADMIN over netns owner. Generic setters need an int, linger
-eight bytes, retaining seconds on disable. Negative receive low-water becomes INT_MAX, zero becomes one.
-Read-only type/error/domain/protocol give `ENOPROTOOPT` after size check. Unknown generic SOL_SOCKET sets
-succeed without effect. Netlink enforces receive capacity. Unix enforces send capacity and stream receive
-low-water but only records receive capacity.
+Unix/netlink `SockOpts` defaults both buffers to 212992: plain sets compare unsigned, cap there and double
+(floors 4608 send / 2304 recv); FORCE needs initial-userns CAP_NET_ADMIN (`EPERM`), clamps 0..INT_MAX/2
+then doubles with same floors. DEBUG enable needs that cap (`EACCES`); priority outside 0–6 needs
+CAP_NET_RAW/NET_ADMIN over netns owner. Generic setters need int (linger 8 B, keeping sec on disable); recv
+low-water <0 → INT_MAX, 0 → 1; read-only type/error/domain/proto → `ENOPROTOOPT` after size check; unknown
+generic SOL_SOCKET sets are no-ops. Netlink enforces recv capacity; Unix enforces send capacity and stream
+recv low-water (only records recv capacity).
 
-Inet SO_SNDBUFFORCE/SO_RCVBUFFORCE need initial-user-namespace CAP_NET_ADMIN, then use ordinary host
-options. Raw ICMP options and UDP TTL/RECVERR tap handling precede BPF. A successful host receive-buffer
-update resyncs raw receive accounting.
+Inet SO_SNDBUFFORCE/SO_RCVBUFFORCE need initial-userns CAP_NET_ADMIN, then use ordinary host opts. Raw ICMP
+opts and UDP TTL/RECVERR tap handling precede BPF; successful host recv-buffer update resyncs raw recv
+accounting.
 
-- SO_ATTACH_BPF and SO_ATTACH_REUSEPORT_EBPF check optlen <4 (`EINVAL`), then only plain TCP ATTACH_BPF
-  checks namespace-owner CAP_NET_ADMIN (`EPERM`), then exact size four (`EINVAL`). Invalid guest fd gives
-  `EBADF`, valid fd `EINVAL`. No guest fd reaches the host.
-- SO_ATTACH_FILTER and SO_ATTACH_REUSEPORT_CBPF check four-byte minimum, plain TCP ATTACH_FILTER
-  capability, exact 16-byte fprog, host filter lock (`EPERM`), then nonnull program and 1–4096
-  instructions (`EINVAL`). An unreadable lock is treated as unlocked. Copy eight bytes per instruction and
-  substitute a host-local fprog pointer. Plain TCP here means stream protocol 6, excluding MPTCP.
-- For plain TCP ATTACH_FILTER, host `EPERM`, test hook 14 or an existing deferred listen selects
-  validation on a scratch UDP fd. Fallback accepts exact RET 0 only in host TCP_CLOSE with SO_REUSEPORT
-  off, or RET UINT_MAX after only immediate/length loads. Other valid programs give `EOPNOTSUPP`. An
-  existing host filter blocks fallback when no program is retained. Failure preserves the old filter.
-  REUSEPORT_CBPF stays on the host path.
-- SO_GET_FILTER takes and returns **instruction counts**. Zero asks for the count, short nonzero room
-  gives `EINVAL`. Retained bytes answer locally, else HAL queries up to 4096 instructions. SO_LOCK_FILTER
-  uses the host. SO_DETACH_FILTER on a retained program needs ≥4 bytes and an unlocked host filter. During
-  deferred listen SO_REUSEADDR uses the saved guest value. Enabling reuse-port under retained RET 0 or
-  rebinding the device while a private queue exists gives `EOPNOTSUPP`.
-- SO_MARK needs four bytes then namespace-owner CAP_NET_RAW or NET_ADMIN. It feeds nftables and accepted
-  children without setting a host mark. New-namespace AF_INET6 records IPV6_V6ONLY locally. Changing it
-  once both bound and registered gives `EINVAL`.
-- SO_BINDTODEVICE truncates to 15 bytes or first NUL. SO_BINDTOIFINDEX needs a nonnegative int. Empty
-  name/zero clears. Namespace lookup (`ENODEV`) precedes CAP_NET_RAW on rebind/clear. First bind needs no
-  guest capability. Real initial interfaces go to the host by name. Store the index and update any
-  namespace binding. Unbound name readback has zero length. Otherwise room below 16 gives `EINVAL`,
-  deleted device `ENODEV`, success a NUL-terminated name. Index readback returns the saved index.
-- SO_ERROR drains the relevant ICMP tap, consumes `icmp_err` before `pending_err`, then uses raw/UDP
-  handlers or host. A returned 4-byte ECONNREFUSED on a counted opening increments AttemptFails. SO_TYPE
-  reconstructs SOCK_RAW for raw ping-backed sockets. Remaining inet options, including detach without a
-  retained program, priority, IP_TRANSPARENT, SO_PEERCRED and ordinary TCP options, use host semantics.
+- SO_ATTACH_BPF/SO_ATTACH_REUSEPORT_EBPF: optlen <4 (`EINVAL`), then plain TCP ATTACH_BPF checks
+  netns-owner CAP_NET_ADMIN (`EPERM`), exact size 4 (`EINVAL`); invalid guest fd → `EBADF`, valid →
+  `EINVAL` (no guest fd reaches host).
+- SO_ATTACH_FILTER/SO_ATTACH_REUSEPORT_CBPF: ≥4 B, plain TCP ATTACH_FILTER cap, exact 16 B fprog, host
+  filter lock (`EPERM`; unreadable = unlocked), nonnull prog and 1–4096 insns (`EINVAL`), copying 8 B/insn
+  with host-local fprog ptr. Plain TCP = stream proto 6 (excl. MPTCP).
+- Plain TCP ATTACH_FILTER: host `EPERM`, test hook 14 or deferred listen validates on scratch UDP fd;
+  fallback accepts only exact RET 0 (host TCP_CLOSE, SO_REUSEPORT off) or RET UINT_MAX after only
+  immediate/length loads (other valid progs → `EOPNOTSUPP`). Existing host filter blocks fallback without
+  retained prog; failure keeps old filter. REUSEPORT_CBPF stays on host path.
+- SO_GET_FILTER takes/returns **instruction counts** (0 queries count; short nonzero room → `EINVAL`;
+  retained answers locally, else HAL ≤4096 insns). SO_LOCK_FILTER uses host; SO_DETACH_FILTER on retained
+  prog needs ≥4 B and unlocked host filter. Deferred listen SO_REUSEADDR uses saved guest value; enabling
+  reuse-port under retained RET 0 or rebinding device with private queue → `EOPNOTSUPP`.
+- SO_MARK needs 4 B + netns-owner CAP_NET_RAW/NET_ADMIN; feeds nftables and accepted children without
+  setting host mark. New-ns AF_INET6 tracks IPV6_V6ONLY locally (`EINVAL` to change once bound and
+  registered).
+- SO_BINDTODEVICE truncates to 15 B or NUL; SO_BINDTOIFINDEX needs nonnegative int (empty/0 clears). Ns
+  lookup (`ENODEV`) precedes CAP_NET_RAW on rebind/clear (first bind needs no guest cap). Real initial
+  ifaces pass name to host; index is saved and ns binding updated. Unbound name readback len 0; else room
+  <16 → `EINVAL`, deleted dev → `ENODEV`, else NUL-terminated name; index readback returns saved index.
+- SO_ERROR drains relevant ICMP tap, consumes `icmp_err` before `pending_err`, then uses raw/UDP handlers
+  or host (returned 4 B ECONNREFUSED on counted opening increments AttemptFails). SO_TYPE reconstructs
+  SOCK_RAW for ping-backed raw sockets. Remaining inet opts (detach without retained prog, priority,
+  IP_TRANSPARENT, SO_PEERCRED, ordinary TCP opts) use host semantics.
 
 ### Socket ioctls
 
@@ -321,31 +300,27 @@ give `EOPNOTSUPP`. MTU/window/initial RTT are ignored.
 
 ### DNS stub
 
-During VFS setup, `ensure_resolv_conf` writes `nameserver 127.0.0.53` plus newline (0644) only if /etc
-exists and lacks a resolv.conf entry. Failure only logs. Android Debian import writes its own resolver
-entry.
+VFS setup's `ensure_resolv_conf` writes `nameserver 127.0.0.53\n` (0644) if `/etc` exists without
+`resolv.conf` (failure logs only); Android Debian import writes its own entry.
 
-`stub_capable` requires initial-namespace SOCK_DGRAM, UDP, no raw flag or ICMP state. `is_stub` recognizes
-127.0.0.53:53 and its IPv4-mapped form. Connect sets `stub_peer`, clears `peer_map` and attempts host connect for local
-address/port. Send to the endpoint or address-less send on a stub peer attempts wildcard autobind if
-needed, then bypasses host payload I/O, nft and traffic counters.
+`stub_capable` needs initial-ns SOCK_DGRAM UDP without raw flag or ICMP state; `is_stub` matches
+127.0.0.53:53 and IPv4-mapped form. Connect sets `stub_peer`, clears `peer_map` and tries host connect for
+local addr/port. Sends to it (or address-less on stub peer) try wildcard autobind if needed, bypassing host
+payload I/O, nft and traffic counters.
 
-At 128 registered queries kernel-wide (`DNS_MAX_INFLIGHT`), send drops the query and returns its length.
-Otherwise `Kernel::dns_queries` takes an id and weak socket. Spawn failure removes it (`EAGAIN`). A
-`dns-stub` thread calls `hal::net::dns_query`, appends (id, answer) to `Shared::dns_answers` and signals
-the timer without holding the kernel.
+At 128 kernel-wide queries (`DNS_MAX_INFLIGHT`), send drops query and returns length; else
+`Kernel::dns_queries` stores id + weak socket (spawn failure removes it, `EAGAIN`). A `dns-stub` thread
+runs `hal::net::dns_query`, pushes (id, answer) to `Shared::dns_answers` and signals timer without holding
+kernel. HAL rejects queries <12 B: Android calls `android_res_nsend` on default net 0 (30 s poll deadline,
+cancel on failed poll); non-Android tries ≤3 resolv.conf servers (UDP checks header/ID in 3 s/server;
+truncation retries length-framed TCP with fresh 3 s; no servers → `EHOSTUNREACH`). On error `servfail`
+copies query, setting QR, RA, rcode 2 if ≥4 B exist.
 
-HAL rejects queries below 12 bytes. Android calls `android_res_nsend` on default network zero, with a 30 s
-poll deadline and cancellation on unsuccessful poll. Non-Android tries up to three resolv.conf servers.
-UDP checks header/ID within 3 s per server. Truncation retries over length-framed TCP with a fresh 3 s. No
-servers gives `EHOSTUNREACH`. On error `servfail` copies the query, setting QR, RA and rcode 2 if four
-bytes exist.
-
-`deliver_dns` removes completed ids and drops dead-socket replies. It compares bytes **already queued**
-with host SO_RCVBUF (fallback 212992). Only a sum strictly above the limit drops the new reply. Enqueue
-increments `answered` and wakes the socket. Receive serves this FIFO before host data with the stub
-source, peek and truncation semantics. FIONREAD gives front length. Queued answers supply POLLIN|POLLOUT,
-and tapped UDP additionally supplies host fd and any ICMP error bit. Read generations use `answered`.
+`deliver_dns` drops completed ids and dead-socket replies, dropping new reply only if **already queued**
+bytes strictly exceed host SO_RCVBUF (fallback 212992). Enqueue increments `answered` and wakes socket.
+Recv serves this FIFO before host data with stub src, peek and truncation semantics; FIONREAD gives front
+len. Queued answers supply POLLIN|POLLOUT (tapped UDP adds host fd + ICMP error bit); read generations use
+`answered`.
 
 ### Low ports and inbound forwarding
 
@@ -463,29 +438,28 @@ result gives `ENOENT`. Mapped IPv4 uses SOL_IP. Success leaves optlen unchanged.
 
 ## Confirmed bugs / technical debt
 
-- In-process socket buffers retain fixed defaults/caps after writes to the guest core buffer sysctls.
-- `sendmmsg` looks up the numeric fd anew per record. Despite best-effort dispatcher prefaulting, a
-  post-send `msg_len` fault can hide earlier progress, and whole-syscall FUSE retry can repeat output.
-  In `recvmmsg`, `SCM_RIGHTS` fds install before the outer `msg_len` store, so an unrecoverable `msg_len`
-  fault can leak installed fds for an uncounted record.
-- On inet streams, an unrecoverable scatter fault in a later WAITALL piece leaves that piece consumed but
-  absent from the returned count, and continuing WAITALL after a short read drops earlier ancillary data
-  and flags (the finishing piece's metadata wins; partial completion after failed wait/error returns empty
-  controls and zero flags).
-- `wait_peek` saves, raises and restores host `SO_RCVLOWAT` across an unlocked wait, which can overwrite a
-  concurrent `SO_RCVLOWAT` update.
-- Normal `connect` overwrites `guest_peer` before calling host connect, so on `EISCONN` subsequent
-  `getpeername` verifies the host peer and returns the rejected destination.
-- DNS stub connect ignores the host connect result, so synthetic peer success can disagree with the actual
-  local endpoint. A receive with `MSG_ERRQUEUE` checks the ordinary stub FIFO and can consume a DNS reply.
-- The external DNAT relay registers no original-destination tuple. Its accepting socket can return its
-  translated local address when tracking or `ENOENT`, losing the pre-DNAT destination.
-- Passthrough options are checked against host credentials. Even authorized guest FORCE uses capped plain
-  host options. A guest-authorized real-device bind ignores host `EPERM`, and clearing a host binding
-  ignores host errors, so the saved interface and host routing can diverge.
-- A host-refused RET 0 listener can give peers an immediate refusal. A reuse-address conflict can surface
-  at activation. Packet-dependent filters, dropping on active streams and reuse-port sharing exceed the
-  fallback. The TCP drop blackhole retains its host fds past kernel teardown.
+- In-process socket buffers keep fixed defaults/caps after guest core buffer sysctl writes.
+- `sendmmsg` re-resolves numeric fd per record; despite best-effort dispatcher prefaulting, a post-send
+  `msg_len` fault can hide earlier progress and whole-syscall FUSE retry can repeat output. In `recvmmsg`,
+  SCM_RIGHTS fds install before outer `msg_len` store, so an unrecoverable `msg_len` fault can leak fds
+  for an uncounted record.
+- On inet streams, an unrecoverable scatter fault in a later WAITALL piece leaves it consumed but uncounted;
+  continuing WAITALL after a short read drops earlier controls/flags (finishing piece wins; partial
+  completion after failed wait/error returns empty controls and zero flags).
+- `wait_peek` saves/raises/restores host SO_RCVLOWAT across an unlocked wait, risking overwriting a
+  concurrent SO_RCVLOWAT update.
+- Normal `connect` overwrites `guest_peer` before host connect, so on `EISCONN` later `getpeername`
+  verifies the host peer and returns the rejected destination.
+- DNS stub connect ignores host connect result (synthetic peer success can disagree with actual local
+  endpoint); recv with MSG_ERRQUEUE checks ordinary stub FIFO and can consume a DNS reply.
+- External DNAT relay registers no origdst tuple, so accepting socket returns translated local addr when
+  tracking or `ENOENT`, losing pre-DNAT destination.
+- Passthrough opts check host creds: authorized guest FORCE uses capped plain host opts; guest-authorized
+  real-device bind ignores host `EPERM` and clearing host binding ignores host errors (saved iface and host
+  routing can diverge).
+- Host-refused RET 0 listener can give peers immediate refusal; reuse-addr conflict can surface at
+  activation; packet-dependent filters, active-stream drops and reuse-port sharing exceed fallback. TCP
+  drop blackhole keeps host fds past kernel teardown.
 
 ## Open questions
 

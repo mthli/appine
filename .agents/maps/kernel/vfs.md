@@ -5,7 +5,7 @@
 >
 > Verified: 2026-11-26 (full refresh; 18 claims verified — 13 confirmed, 5 partial, 0 refuted; all fixes applied)
 >
-> Maintained: 2026-11-27 (targeted verification only since the full mapping; latest change: zero-alloc stack `WalkPending` in `Vfs::walk_in`, `PathBytes` stack path reads, and `Cached::{readlink,access}` with `CachedCred` and `ROOT_MOUNT` flags)
+> Maintained: 2026-11-27 (targeted verification only since the full mapping; latest change: in-place condensation with no mapped claim changes)
 
 ## Responsibilities
 
@@ -53,25 +53,21 @@ paths use cwd for `AT_FDCWD` or the fd's directory (`EBADF` for bad fd, `ENOTDIR
 type/no node). `lookup_at_or_fd` with empty path and `AT_EMPTY_PATH` takes cwd or fd node
 (`EBADF` if absent). Stat and anonymous attrs also have fd-specific routes.
 
-`walk_resolve` runs `walk_in` in one store snapshot using a stack-backed `WalkPending` (32 inline
-borrowed `&[u8]` slots with lazy overflow and symlink target buffers, skipping final `Dentry`
-allocation when `want_found == false`). Path syscalls read guest strings into a 256-byte
-stack-inline `PathBytes` buffer (`read_path_buf`) with heap fallback. A trailing slash forces final-link follow
-and requires a searchable directory. Each name checks length (255 bytes), type and search,
-including `.` and `..`. Dot preserves the dentry. Dotdot clears it, stops at process root, or
-climbs stacked attachments, takes a parent and enters its top mount. A store parent outside
-the bind subtree gives `ENOENT`. Child lookup also enters the top mount. Ordinary walks touch
-mounts. `resolve_mountpoint` preserves expiry marks for umount and host stats.
+`walk_resolve` runs `walk_in` in one store snapshot via stack-backed `WalkPending` (32 inline borrowed
+`&[u8]` slots, lazy overflow/symlink-target buffers, skipping final `Dentry` when `!want_found`). Path
+syscalls read guest strings into 256 B stack-inline `PathBytes` (`read_path_buf`, heap fallback). Trailing
+`/` forces final-link follow and searchable dir. Each component (incl. `.`/`..`) checks ≤255 B, type,
+search: `.` keeps dentry; `..` clears it, stops at process root or climbs stacked attachments, takes parent
+(store parent outside bind subtree → `ENOENT`) and enters top mount (as does child lookup). Ordinary walks
+touch mounts; `resolve_mountpoint` keeps expiry marks (umount/host stats).
 
-`searches_all` skips store, overlay and synthetic search checks for initial-namespace
-`CAP_DAC_OVERRIDE` or `CAP_DAC_READ_SEARCH`. Otherwise store and overlay use the visible
-directory's permissions. `View::searched` supplies attrs for cgroup directories, the mqueue root
-and live other-group proc `fd`, `fdinfo` and `ns` directories. Own-group search works when
-non-dumpable. Dead proc tasks supply no search attrs, leaving lookup to report disappearance.
-Procfs also gates lookup, listing and magic links. Final `faccessat` allows the own-group
-exception for nonwrite masks on `fd`/`fdinfo` and search alone on `ns`. Chdir/fchdir/chroot
-check the final directory via `searched_attrs` or FUSE `may_chdir`. Chroot then checks
-`CAP_SYS_CHROOT` in the caller's namespace and preserves cwd.
+`searches_all` skips store/overlay/synthetic search checks for initial-ns `CAP_DAC_OVERRIDE` or
+`CAP_DAC_READ_SEARCH`; else store/overlay check visible dir perms. `View::searched` supplies attrs for
+cgroup dirs, mqueue root and live other-group proc `fd`/`fdinfo`/`ns` (own-group works when non-dumpable;
+dead proc tasks give none so lookup reports disappearance; procfs also gates lookup/listing/magic links).
+Final `faccessat` allows own-group exception for nonwrite masks on `fd`/`fdinfo` and search-only on `ns`.
+Chdir/fchdir/chroot check final dir via `searched_attrs` or FUSE `may_chdir`; chroot checks caller-ns
+`CAP_SYS_CHROOT` and keeps cwd.
 
 FUSE always checks whether the connection allows the caller. `default_permissions` can
 require cached attrs. On a miss, `lookup_walk` batches consecutive ordinary names up to dots,
@@ -130,31 +126,25 @@ reads the fd without flags (`ENOENT` for node-less fd/nonlink, `EINVAL` for a no
 
 ### No-BKL stat, readlink and access
 
-`Fast::new` snapshots a root in attached `ROOT_MOUNT` (including chroot within it) without
-`NOSYMFOLLOW` and with `searches_all` credentials, recording both effective `eaccess_cred` and
-real-ID `access_cred = cred.for_access()`. Absolute input permits any cwd. Relative input needs
-`AT_FDCWD` and a cwd in that mount. Calls need a current epoch, valid flags/amode/size (`readlinkat`
-falls back on `size <= 0` or targets filling `PATH_MAX` when `size > PATH_MAX`), and a readable
-nonempty path fitting `PATH_MAX` including NUL. Global tracing, syscall tracing, stepping or
-pending instruction-cache invalidation disables fast dispatch. Seccomp can admit a syscall number
-cached as always allowed.
+`Fast::new` snapshots root in attached `ROOT_MOUNT` (incl. chroot inside it) without `NOSYMFOLLOW`, with
+`searches_all` creds, recording effective `eaccess_cred` and real-ID `access_cred = cred.for_access()`.
+Absolute paths allow any cwd; relative needs `AT_FDCWD` + cwd in that mount. Needs current epoch, valid
+flags/amode/size (`readlinkat` falls back on `size <= 0` or targets filling `PATH_MAX` when `size >
+PATH_MAX`), readable nonempty path ≤`PATH_MAX` incl. NUL. Global/syscall tracing, stepping or pending
+icache invalidation disables fast dispatch; seccomp may admit cached always-allowed syscall numbers.
 
-`Cached::{stat,readlink,access}` use a store metadata reader (with `ROOT_MOUNT` `root_readonly` and
-`root_noexec` snapshotted into `Cached` and rebuilt on `ROOT_DEV` `set_sb_flags`). A cached
-negative returns `ENOENT` directly. An unavailable/stale reader, uncached entry, host stat failure,
-over 64 pending steps or an encountered store mount point falls back to the BKL. The mount-point
-list includes the store root when the boot mount is no longer topmost. Length/type/loop errors can
-be final. A followed trailing link owned by someone other than its sticky world-writable directory's
-owner falls back. Final immutable, append or nodump forces fallback for both stat calls; noatime
-alone does not. `Cached::readlink` returns `EINVAL` on non-symlinks and truncates into the caller's
-buffer. `Cached::access` requires `CAP_DAC_OVERRIDE` or `CAP_DAC_READ_SEARCH` in `CachedCred`,
-enforces regular-file `root_noexec` (`EACCES`), `IMMUTABLE` (`EPERM`), `Cred::permission`-equivalent
-DAC (falling back for extended ACLs on non-exec `X_OK` or non-owned group/other checks), and
-`root_readonly` (`EROFS` for non-special nodes). Fast statx uses `ROOT_MOUNT` and advertises the
-supported attribute mask. `mounts_changed_ns` always rebuilds cached mount state and
-increments/wakes once per affected namespace that still exists and is nonanonymous. Mount,
-fs-context and credential changes invalidate snapshots with `fast_changed`; `Fast::refresh`
-rebuilds on epoch change under the BKL.
+`Cached::{stat,readlink,access}` use a store metadata reader (snapshotting `ROOT_MOUNT`
+`root_readonly`/`root_noexec`, rebuilt on `ROOT_DEV` `set_sb_flags`). Cached negatives → `ENOENT`;
+unavailable/stale reader, uncached entry, host stat failure, >64 pending steps or store mount point (incl.
+store root when boot mount isn't topmost) fall back to BKL. Length/type/loop errors can be final. Followed
+trailing link not owned by its sticky world-writable dir's owner, or final immutable/append/nodump on
+either stat call (not noatime alone), falls back. `Cached::readlink` → `EINVAL` on non-symlinks, truncates
+to caller buffer. `Cached::access` needs `CAP_DAC_OVERRIDE`/`CAP_DAC_READ_SEARCH` in `CachedCred`, checks
+regular `root_noexec` (`EACCES`), `IMMUTABLE` (`EPERM`), `Cred::permission`-equivalent DAC (fallback for
+extended ACLs on non-exec `X_OK` or non-owned group/other checks) and `root_readonly` (`EROFS` for
+non-special nodes). Fast statx uses `ROOT_MOUNT` and advertises supported attr mask. `mounts_changed_ns`
+always rebuilds cached mount state and increments/wakes once per live nonanonymous affected ns;
+mount/fs-context/cred changes call `fast_changed`; `Fast::refresh` rebuilds on epoch change under BKL.
 
 ### Mount flags and atime
 
@@ -202,48 +192,40 @@ nosuid,nodev, `/run` 0755 nosuid,nodev (20% RAM, `800 << 10` inodes).
 
 ### Tmpfs accounting and lifetime
 
-- A count charges one inode for the root and every name (including hard links), pages once per
-  distinct regular file or symlink, then adds unlinked records. A symlink of at least 128 bytes
-  costs one page. `statfs` recounts and reports zero total/free for unlimited resources.
-- `TmpfsFileRanges::allocated` includes reservations and instantiated pages. `data` tracks
-  mapped-instantiated pages. Allocation rounds outward. `tmpfs_missing` combines guest runs
-  with host extents (FIEMAP, with a seek fallback). Without guest runs, total allocation uses
-  FIEMAP or rounded host block counts. Tracked stats combine ranges and host allocation in
-  512-byte sectors. `SEEK_DATA`/`SEEK_HOLE` merge host results with `data`, so an untouched
-  logical reservation can consume quota without becoming data or extending EOF.
-- Check room before creation, then charge after success, including AF_UNIX bind. Overlay
-  copy-up checks ancestors and data against the tmpfs upper. For a tracked lower inode the
-  copy includes mapped data within EOF and omits untouched reservations. Replacing a whiteout
-  needs no extra inode for that name. Mapping quota follows the layer supplying the mapped
-  inode, even for a held unlinked object.
-- `tmpfs_write_room` stops before the first unfittable page (`ENOSPC` if no prefix fits).
-  Final room check, write and charge hold the BKL. Fallocate needs the entire missing range.
-  Before refusal or shortening, changed usage triggers one fresh count. `tmpfs_resized`
-  charges the measured delta and updates unlinked records. Sparse truncate growth costs no
-  pages. Shrink/punch forget whole guest pages. `TmpfsMapping::fault_range` admits in-file faults:
-  when existing host data covers the faulting page it maps ahead up to the fault window (clamped to
-  EOF and the next host hole) with zero charge; in a hole it admits only the demanded range plus any
-  contiguous already-instantiated guest data without speculatively faulting ahead into uninstantiated
-  holes, instantiating pages even for a private read without double-charging reservations, shrinking
-  multi-page hole ranges to the fitting quota prefix via `fit_fault_range` (recounting once before
-  shortening or returning `ENOSPC`), and reserving host blocks on shared writes with single-page
-  fallback if a multi-page `fallocate` fails. Read/private faults preserve backing mtime/ctime.
-  Shared write faults publish mtime before granting write.
-- `tmpfs_victim` captures pages and the last-linked regular file's object before removal or
-  replacement. `tmpfs_removed` refunds the name and any last-link pages, or puts a regular file
-  found by `file_in_use` in `Tmpfs::unlinked` with **one inode and its pages still charged**. Its
-  host pin allows stat via the last `O_PATH` fd after store reaping.
-- `evict_unlinked_tmpfs` scans fd tables (including path fds), AF_UNIX inflight files, loop
-  backings, distinct address spaces and running executables. Borrow conflicts defer the scan.
-  Live pins refresh page counts. Dead entries lose their ranges, pages and inode. Hooks run
-  at post-syscall collection, thread exit, exec close-on-exec, tmpfs statfs and non-bind
-  remount. The sweep also handles deferred shared-object releases, linkable tmpfiles and
-  closed memfd size records with separate liveness checks. Memfds bypass ordinary tmpfs quota.
-- `open_tmpfile` checks directory type, writability and permission. Store/tmpfs unnamed files
-  inherit default ACL and inheritable flags. Tmpfs immediately charges one inode and pins it
-  as unlinked. Without `O_EXCL` the inode is linkable. The first successful `Store::link` clears
-  eligibility and `linkat` removes the unlinked record without another charge, even at full
-  inode quota. Later hard links each need fresh room.
+- Counting charges 1 inode per root/name (incl. hard links), pages once per distinct regular file/symlink
+  (≥128 B symlink = 1 page), plus unlinked records. `statfs` recounts; unlimited resources report 0
+  total/free.
+- `TmpfsFileRanges::allocated` tracks reservations + instantiated pages; `data` tracks mapped-instantiated
+  pages; allocation rounds outward. `tmpfs_missing` merges guest runs with host extents (FIEMAP, seek
+  fallback); without guest runs, total uses FIEMAP or rounded host blocks. Tracked stats combine ranges +
+  host allocation in 512 B sectors. `SEEK_DATA`/`SEEK_HOLE` merge host results with `data`, so untouched
+  logical reservations consume quota without becoming data or extending EOF.
+- Creation (incl. AF_UNIX bind) checks room before and charges after success. Overlay copy-up checks
+  ancestors/data against tmpfs upper (tracked lower copies mapped data ≤EOF, omitting untouched
+  reservations); replacing a whiteout needs no extra inode for that name. Mapping quota follows the
+  supplying layer, even for held unlinked objects.
+- `tmpfs_write_room` stops before first unfittable page (`ENOSPC` if none fits); final room check, write
+  and charge hold BKL. Fallocate needs full missing range; changed usage triggers 1 fresh count before
+  refusal/shortening. `tmpfs_resized` charges measured delta and updates unlinked records. Sparse truncate
+  growth costs 0 pages; shrink/punch forget whole guest pages. `TmpfsMapping::fault_range` admits in-file
+  faults: host data covering faulting page maps ahead to fault window (clamped to EOF/next host hole) at 0
+  charge; holes admit only demanded range + contiguous instantiated guest data (no speculative hole
+  read-ahead), instantiating pages even on private reads without double-charging reservations, shrinking
+  multi-page hole ranges to fitting prefix via `fit_fault_range` (recount once before shortening/`ENOSPC`)
+  and reserving host blocks on shared writes (1-page fallback if multi-page `fallocate` fails).
+  Read/private faults keep backing mtime/ctime; shared writes publish mtime before granting write.
+- `tmpfs_victim` captures pages and last-linked regular object before removal/replacement. `tmpfs_removed`
+  refunds name + last-link pages, or moves a regular file found by `file_in_use` to `Tmpfs::unlinked` with
+  **1 inode and its pages still charged** (host pin allows stat via last `O_PATH` fd after store reaping).
+- `evict_unlinked_tmpfs` scans fd tables (incl. path fds), AF_UNIX inflight files, loop backings, distinct
+  address spaces and running executables (borrow conflicts defer). Live pins refresh page counts; dead
+  entries drop ranges, pages and inode. Runs at post-syscall collection, thread exit, exec CLOEXEC, tmpfs
+  statfs, non-bind remount; also sweeps deferred shared-object releases, linkable tmpfiles and closed memfd
+  size records (separate liveness checks). Memfds bypass ordinary tmpfs quota.
+- `open_tmpfile` checks dir type/writability/perm; store/tmpfs unnamed files inherit default ACL and
+  inheritable flags. Tmpfs immediately charges 1 inode and pins it unlinked. Without `O_EXCL` it is
+  linkable: first `Store::link` clears eligibility and `linkat` drops the unlinked record without extra
+  charge even at full inode quota; later hard links need fresh room.
 
 ### Stat and filesystem identity
 
@@ -251,31 +233,26 @@ nosuid,nodev, `/run` 0755 nosuid,nodev (20% RAM, `800 << 10` inodes).
 real fd uses `file_stat_attrs` and `OpenFile::mnt_id`. A followed `OpenFd` link uses the target
 descriptor. Owner IDs are mapped into the caller's namespace (overflow 65534).
 
-- Store stat uses mount device and inode, overlay its visible inode/device following copy-up.
-  Unlinked files/executables can stat the retained host object or FUSE executable snapshot.
-  Namespace files use nsfs, queues their IPC namespace's mqueue device, anonymous pipes,
-  sockets and anon-inodes fixed devices.
-- A devpts-pinned master stats `PtsPtmx` with 1024-byte blocks. Store/overlay ptmx masters
-  report the opened node. Node-less unpinned masters report inode 2, `ROOT_DEV`, 1024-byte
-  blocks. Slaves use their opened device inode or terminal attrs and devpts instance/index.
-- Regular objects and host fds supply host block counts, with tracked tmpfs adjustments.
-  Default block size is 4096, procfs/devpts synthetic nodes use 1024, FUSE can supply its own.
-  Missing block counts derive from size rounded to pages (eight sectors each). Symlinks under
-  60 bytes on `ROOT_DEV` or 128 elsewhere use none. Directories on `ROOT_DEV` report size 4096.
-- `newfstatat`/`statx` accept `AT_SYMLINK_NOFOLLOW`, `AT_EMPTY_PATH`, `AT_NO_AUTOMOUNT`
-  and statx sync flags. `newfstatat` permits both sync bits together. `statx` rejects that combination or a reserved
-  mask bit with `EINVAL` before pathname copy. It reports `STATX_BASIC_STATS | STATX_MNT_ID` regardless
-  of requested fields. `stx_mnt_id` comes from the node or fd (successful empty-path `statx` on a
-  node-less fd reports `ANON_MOUNT`, matching fdinfo). Store/overlay
-  advertise immutable, append and nodump even when clear; `stx_attributes` reports set bits and
-  noatime is outside `stx_attributes_mask`.
-- `statfs_of` returns ext4 magic and host object-directory capacity for store, tmpfs limits
-  for tmpfs, overlayfs magic with store capacity, daemon figures for FUSE (when excluded,
-  `FUSE_SUPER_MAGIC` with zero capacity and zero `f_flags`), or the synthetic
-  filesystem's magic and zero capacity. Supported `f_flags` include `ST_VALID` plus mount flags
-  and superblock read-only/sync/mand. Nsfs reports `ST_VALID` alone. `fstatfs` uses pipefs for
-  anonymous pipes, the underlying filesystem for named FIFOs, mqueue for queue fds, root
-  figures for other node-less fds.
+- Store uses mount dev/ino, overlay visible dev/ino (following copy-up); unlinked files/executables stat
+  retained host objects or FUSE exec snapshots. Namespace files use nsfs, queues their IPC ns mqueue dev,
+  anon pipes/sockets/anon-inodes fixed devs.
+- Devpts-pinned masters stat `PtsPtmx` (1024 B blocks); store/overlay ptmx masters report opened node;
+  node-less unpinned masters report ino 2, `ROOT_DEV`, 1024 B blocks. Slaves use opened dev ino or terminal
+  attrs + devpts instance/index.
+- Regular objects/host fds supply host block counts (+ tracked tmpfs adjustments). Default block size 4096
+  (procfs/devpts synthetic 1024, FUSE own); missing counts derive from page-rounded size (8 sectors/page).
+  Symlinks <60 B on `ROOT_DEV` or <128 B elsewhere use 0 blocks; `ROOT_DEV` dirs report size 4096.
+- `newfstatat`/`statx` accept `AT_SYMLINK_NOFOLLOW`, `AT_EMPTY_PATH`, `AT_NO_AUTOMOUNT` and statx sync
+  flags (`newfstatat` allows both sync bits; `statx` rejects that combo or reserved mask bits with `EINVAL`
+  before path copy). `statx` always reports `STATX_BASIC_STATS | STATX_MNT_ID`; `stx_mnt_id` comes from
+  node/fd (empty-path `statx` on node-less fd → `ANON_MOUNT`, matching fdinfo). Store/overlay advertise
+  immutable/append/nodump even when clear; `stx_attributes` reports set bits (noatime outside
+  `stx_attributes_mask`).
+- `statfs_of`: ext4 magic + host object-dir capacity (store), tmpfs limits (tmpfs), overlayfs magic +
+  store capacity, FUSE daemon figures (excluded → `FUSE_SUPER_MAGIC`, 0 capacity/`f_flags`), or synthetic
+  magic + 0 capacity. `f_flags`: `ST_VALID`, mount flags, sb RO/sync/mand (nsfs: `ST_VALID` only).
+  `fstatfs`: pipefs (anon pipes), underlying fs (named FIFOs), mqueue (queues), root figures (other
+  node-less fds).
 
 ### Access and inode flags
 
@@ -314,72 +291,58 @@ cannot gain write later.
   root) give `EBADF` before mount checks. `Attrs::at` handles `AT_EMPTY_PATH` for `fchownat` /
   `utimensat` and followed proc links to anonymous objects. `fchmodat` takes no flags.
 
-- `chmod` masks to 07777, checks protected flags and ownership, and drops setgid outside the
-  file's group without `CAP_FSETID` over it. On a memfd sealed with `F_SEAL_EXEC`, changing an
-  execute bit gives `EPERM` after ownership. `chown` maps IDs (`EINVAL` if unmapped), with −1
-  unspecified. Without `CAP_CHOWN`, supplying a uid requires the owner keeping that uid, and a
-  gid requires the owner keeping the existing gid or choosing one of their groups.
-- On store/overlay non-directories chown clears setuid, file caps and setgid when group-executable
-  or when the caller lacks both group membership and `CAP_FSETID`. Clearing set-id needs owner
-  or `CAP_FOWNER`. Even `(-1,-1)` can fail on a set-id file or clear caps alone. No supplied IDs
-  and nothing to clear skips the change. Writes/truncates use `kernel/fileio`'s `remove_privs`.
-- `utimensat` validates flags and resolves the target before reading times. A null pathname
-  uses the fd (`EFAULT` with `AT_FDCWD`, otherwise zero flags required). Two `UTIME_OMIT`
-  succeed after target checks. Null times or two `UTIME_NOW` permit ownership or write access,
-  including on append-only. Explicit/mixed updates need owner or `CAP_FOWNER` where locally
-  checked. Immutable blocks both-now as well. Inotify (`notify_utimens`) runs only for store,
-  overlay, cgroup and FUSE (`IN_ACCESS` for atime, `IN_MODIFY` for mtime, `IN_ATTRIB` for both);
-  PTYs, anonymous objects, queues and queue roots emit none.
-- With a VFS, `pipe2` initializes both ends' shared attributes to 0600, creator fsuid/fsgid
-  and creation times (without a VFS, pipe fstat reports 0600, root and zero times). Positive
-  ordinary pipe reads touch atime and writes mtime/ctime. A socket starts at 0777, creation/accept
-  fsuid/fsgid and zero times; socket chown updates the socket and shared attrs when present.
-  `anon_attrs` preserves mutations across aliases, pruning dead weak refs at insertion thresholds.
-  Named FIFOs use their filesystem inode.
+- `chmod` masks to 07777, checks protected flags/ownership, drops setgid outside file's group without
+  `CAP_FSETID` over it; `F_SEAL_EXEC` memfd rejects exec-bit changes (`EPERM`) after ownership. `chown`
+  maps IDs (`EINVAL` if unmapped, −1 unspecified); without `CAP_CHOWN`, supplied uid needs owner keeping
+  it, gid needs owner keeping it or one of their groups. On store/overlay non-dirs, chown clears setuid,
+  file caps and setgid (if group-exec or caller lacks group membership and `CAP_FSETID`); clearing set-id
+  needs owner/`CAP_FOWNER`; `(-1,-1)` can fail on set-id or clear caps alone; no IDs and nothing to clear
+  skips change. Writes/truncates use `kernel/fileio`'s `remove_privs`.
+- `utimensat` validates flags and resolves target before reading times (null path uses fd: `EFAULT` on
+  `AT_FDCWD`, else flags must be 0). Two `UTIME_OMIT` succeed after target checks; null times or two
+  `UTIME_NOW` allow owner/write access (incl. append-only, but immutable blocks both-now too);
+  explicit/mixed updates need owner/`CAP_FOWNER` where locally checked. `notify_utimens` runs only for
+  store/overlay/cgroup/FUSE (`IN_ACCESS` atime, `IN_MODIFY` mtime, `IN_ATTRIB` both), not PTYs, anon
+  objects, queues or queue roots.
+- With VFS, `pipe2` sets shared attrs 0600, creator fsuid/fsgid, creation times (no VFS: 0600, root, 0
+  times); positive pipe reads touch atime, writes mtime/ctime. Sockets start 0777, creation/accept
+  fsuid/fsgid, 0 times; socket chown updates socket + shared attrs if present. `anon_attrs` keeps
+  mutations across aliases (pruning dead weak refs at insertion thresholds); named FIFOs use fs inode.
 
 ### Creating and removing names
 
-- `resolve_create_parent` rejects final dots or existing synthetic children with `EEXIST`.
-  For ordinary store creation, `may_create_name` checks search, existence and read-only, then
-  `may_add_name` checks immutable and parent write/search. Non-directory creation with a
-  trailing slash has an earlier existence test (`EEXIST` if present, `ENOENT` otherwise).
-  Overlay checks merged existence, permissions and upper quota before copying up the parent.
-  `create_parent_at` exposes this to AF_UNIX bind. `store_dir` rejects `Node::Overlay` with `EXDEV`
-  and accepts any directly addressed `Node::Store` without checking whether it backs an overlay layer.
-- `new_owner` applies setgid-directory inheritance and skips normal umask for a parent default
-  ACL. `create_in` installs inherited ACLs in the creation transaction. The access ACL is
-  intersected with the requested mode and stored only if extended. New directories also keep
-  the full default ACL. Symlinks skip inheritance. Overlay creation can replace a whiteout and
-  mark the new directory opaque in that transaction. Upper create events precede overlay events.
-- For existing `O_CREAT` targets, `may_create_in_sticky` uses found parent and store/overlay/FUSE
-  attrs. `protected_regular` defaults to 2, `protected_fifos` to 1. In sticky world-writable
-  directories (also group-writable at level 2) a caller gets `EACCES` unless its fsuid or the
-  directory owner equals the file owner, including root. Protected symlinks/hardlinks default on.
-- Cgroup mkdir checks parent search, existing name/dots, read-only, then write/search.
-  FUSE creation uses the daemon. Store/overlay `mknodat` validates type after resolving the
-  parent and rejecting dots. Zero/regular, char, block, FIFO and socket are accepted, directory
-  gives `EPERM` and other types `EINVAL`. Device creation needs initial-namespace `CAP_MKNOD`
-  and device BPF permission after admission. A char whiteout (device zero) skips both checks
-  and is refused on overlay. `symlinkat` rejects an empty target before reading the new path.
-- `unlinkat` accepts only `AT_REMOVEDIR`. It resolves the parent once before dispatching to mqueue,
-  cgroup, overlay, FUSE, or store.
-  Other synthetic parents give `EROFS`/`EACCES` before dot/victim checks. Store unlink of
-  either dot gives `EISDIR`, rmdir of `.` gives `EINVAL` and of `..` gives `ENOTEMPTY`. Otherwise
-  writability precedes normal lookup. Plain unlink with trailing slash gives `ENOENT` if
-  missing, `EISDIR` for a directory, `ENOTDIR` otherwise, ahead of delete permission. Store delete
-  runs `may_delete` (search, victim lookup, immutable parent, write/search and sticky policy, then
-  protected flags on parent and victim), mount-point `EBUSY` and tmpfs victim inspection inside
-  `Store::remove_checked`'s removal write transaction.
-- `linkat` validates flags, then requires initial-namespace `CAP_DAC_READ_SEARCH` whenever
-  `AT_EMPTY_PATH` is set (`ENOENT` before reading paths). It resolves source before destination.
-  Existing pseudo destination gives `EEXIST`. Overlay pairs and FUSE destinations get separate
-  handlers, other mixed nodes `EXDEV`. For store nodes, dots and trailing-slash checks precede
-  parent search, `EEXIST`, `EROFS` and cross-mount `EXDEV`, even between binds. Protected
-  hardlinks require ownership/capability or a readable, writable regular source without setuid
-  or group-executable setgid. Next come directory admission, source flags, tmpfs room and
-  `Store::link` (directory `EPERM`, zero links `ENOENT` except linkable tmpfiles, no `EMLINK` limit).
-  A deleted regular file reached via proc fd keeps its opened mount. A followed memfd stays
-  synthetic (`EXDEV`), while its direct empty-path fd has a store node on the root mount.
+- `resolve_create_parent` rejects final dots or existing synthetic children (`EEXIST`). Store create runs
+  `may_create_name` (search, existence, RO) then `may_add_name` (immutable, parent write/search); non-dir
+  create with trailing `/` tests existence earlier (`EEXIST`/`ENOENT`). Overlay checks merged existence,
+  perms and upper quota before parent copy-up. `create_parent_at` exposes this to AF_UNIX bind. `store_dir`
+  rejects `Node::Overlay` (`EXDEV`) and accepts directly addressed `Node::Store` without checking overlay
+  backing.
+- `new_owner` applies setgid-dir inheritance and skips normal umask if parent has a default ACL.
+  `create_in` installs inherited ACLs in creation txn: access ACL intersected with requested mode (stored
+  only if extended), new dirs keep full default ACL, symlinks skip inheritance. Overlay create may replace
+  whiteout and mark new dir opaque in that txn; upper create events precede overlay events.
+- For existing `O_CREAT` targets, `may_create_in_sticky` uses found parent + store/overlay/FUSE attrs
+  (`protected_regular`=2, `protected_fifos`=1): in sticky world-writable dirs (also group-writable at 2),
+  caller (incl. root) gets `EACCES` unless fsuid or dir owner equals file owner. Protected
+  symlinks/hardlinks default on.
+- Cgroup mkdir checks parent search, existing name/dots, RO, write/search; FUSE uses daemon. Store/overlay
+  `mknodat` resolves parent, rejects dots, validates type (0/reg/chr/blk/FIFO/sock ok, dir `EPERM`, other
+  `EINVAL`). Devices need initial-ns `CAP_MKNOD` + device BPF after admission; char whiteout (dev 0) skips
+  both and is refused on overlay. `symlinkat` rejects empty target before reading new path.
+- `unlinkat` accepts only `AT_REMOVEDIR`, resolving parent once before mqueue/cgroup/overlay/FUSE/store
+  dispatch (other synthetic parents → `EROFS`/`EACCES` before dot/victim checks). Store unlink `.`/`..` →
+  `EISDIR`, rmdir `.` → `EINVAL`, `..` → `ENOTEMPTY`; else writability precedes lookup. Plain unlink with
+  trailing `/` → `ENOENT` (missing), `EISDIR` (dir) or `ENOTDIR` before delete perm. Store delete runs
+  `may_delete` (search, victim lookup, immutable parent, write/search, sticky, then parent/victim protected
+  flags), mount-point `EBUSY` and tmpfs victim inspection in `Store::remove_checked`'s removal write txn.
+- `linkat` validates flags, requiring initial-ns `CAP_DAC_READ_SEARCH` with `AT_EMPTY_PATH` (`ENOENT`
+  before path reads), resolving source before dest. Existing pseudo dest → `EEXIST`; overlay pairs and FUSE
+  dest use own handlers, other mixed → `EXDEV`. Store checks dots/trailing `/` before parent search,
+  `EEXIST`, `EROFS`, cross-mount `EXDEV` (even across binds). Protected hardlinks need owner/cap or rw
+  regular source without setuid/group-exec setgid; then dir admission, source flags, tmpfs room,
+  `Store::link` (dir `EPERM`, 0 links `ENOENT` except linkable tmpfiles, no `EMLINK`). Deleted regular
+  files via proc fd keep opened mount; followed memfd stays synthetic (`EXDEV`), direct empty-path fd has
+  store node on root mount.
 
 ### Rename and mount points
 
@@ -423,16 +386,13 @@ Partial usercopy returns bytes through the last complete record and advances onl
 
 ### Boot devices and host configuration
 
-Import runs `ensure_dev_nodes` transactionally (propagating errors); boot logs persistent setup
-failures. It creates missing `/proc`, `/sys` (0555), `/run`, `/dev` (0755), then populates `/dev`
-if a directory. `populate` adds missing root-owned entries to the store and boot tmpfs without
-overwriting existing types/modes:
-
-- Char 0666: `null`, `zero`, `full`, `random`, `urandom`, `tty`, `ptmx`, `fuse`; char `kmsg` 0644,
-  `console` 0600.
-- Group `disk` (gid 6), 0660: char `loop-control` (10:237) and block `loop0`–`loop7` (7:0–7).
-- Symlinks: `fd`, `stdin`, `stdout`, `stderr` → `/proc/self/fd` (+ `/0`, `/1`, `/2`).
-- Dirs: `pts` (0755), `shm` (1777), `mqueue` (0755).
+Import runs `ensure_dev_nodes` transactionally (errors propagate); boot logs persistent setup failures.
+Creates missing `/proc`, `/sys` (0555), `/run`, `/dev` (0755), populating `/dev` if a dir. `populate` adds
+missing root-owned entries to store and boot tmpfs without overwriting existing types/modes: char 0666
+(`null`, `zero`, `full`, `random`, `urandom`, `tty`, `ptmx`, `fuse`), `kmsg` 0644, `console` 0600; gid 6
+(`disk`) 0660 char `loop-control` (10:237) + block `loop0`–`loop7` (7:0–7); symlinks
+`fd`/`stdin`/`stdout`/`stderr` → `/proc/self/fd` (+ `/0`,`/1`,`/2`); dirs `pts` (0755), `shm` (1777),
+`mqueue` (0755).
 
 During rootfs-backed boot (`Vfs::open_with_gpu`), if tmpfs creation or base population fails, a
 usable store `/dev` serves as fallback; renderer-enabled VFS startup requires the fresh
@@ -482,19 +442,17 @@ overwrite off, existing entries stay untouched; overwrite and `read_file` requir
 
 ## Confirmed bugs / technical debt
 
-- `Attrs::of_fd` selects a node-less devpts slave or message queue directly before checking mount
-  writability, so `fchmod` can succeed where pathname `chmod` returns `EROFS`.
-- `file_in_use` and `live_store_inodes` omit files held solely by pending AIO polls
-  (`PendingPoll`), and unlink-time `file_in_use` skips unborrowable descriptions, so a live
-  unlinked tmpfs regular file can lose its quota charge early.
-- `RESOLVE_CACHED` can perform store I/O or request a FUSE lookup; `statx` lacks birth time and
-  `STATX_DIOALIGN`.
-- File-mount traversal matches a node (so same-mount hard links enter it), while busy checks can
-  distinguish the recorded parent/name.
-- Host punch `EOPNOTSUPP` can leave zero-filled extents charged after logical pages are forgotten,
-  and dynamic boot `/dev` loop-node changes bypass quota/changed flags until a fresh count.
-- Without a VFS, anonymous mode/time mutations lack shared storage (pipe fstat falls back to 0600,
-  root and zero times; socket ownership persists on the socket).
+- `Attrs::of_fd` selects node-less devpts slaves/mqueues before mount RO checks (`fchmod` can pass where
+  `chmod` gives `EROFS`).
+- `file_in_use`/`live_store_inodes` omit pending AIO polls (`PendingPoll`), and unlink-time `file_in_use`
+  skips unborrowable descriptions, so live unlinked tmpfs regular files can lose quota charges early.
+- `RESOLVE_CACHED` can do store I/O or FUSE lookup; `statx` lacks birth time and `STATX_DIOALIGN`.
+- File-mount traversal matches a node (same-mount hard links enter it), while busy checks can distinguish
+  recorded parent/name.
+- Host punch `EOPNOTSUPP` can leave zero-filled extents charged after logical pages are forgotten; dynamic
+  boot `/dev` loop-node changes bypass quota/changed flags until fresh count.
+- Without VFS, anon mode/time mutations lack shared storage (pipe fstat falls back to 0600, root, zero
+  times; socket ownership persists on socket).
 
 ## Open questions
 

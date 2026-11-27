@@ -5,7 +5,7 @@
 >
 > Verified: 2026-11-26 (full mapping, 15 claims independently checked across VMA layout, page faults, permission changes, file invalidation and dump selection)
 >
-> Maintained: 2026-11-27 (targeted verification only since the full mapping; latest change: coalesced `Mm::for_each_page` with 2 MiB leaf fills, `Mm::pin_io`/`HostRegion::io_write_pins` for zero-copy I/O, and `Mm::read_cstr_into`)
+> Maintained: 2026-11-27 (targeted verification only since the full mapping; latest change: in-place condensation with no mapped claim changes)
 
 ## Responsibilities
 
@@ -28,39 +28,29 @@ Outside the module: `kernel/cow`, `kernel/hostmem`, `kernel/mmu`, `kernel/oom`, 
 
 ### Address space
 
-- `Mm` — per-process guest address space (`Rc<RefCell<Mm>>` under the BKL; built unlocked at execve):
-  owns `mmu` (dropped first), `vmas: BTreeMap<start, Vma>`, deferred-release `graveyard`, layout
-  bounds (`brk_start`, `brk`, `mmap_top`, `start_stack`, `stack_low`), non-reused `id`, `shared_maps`
-  (shared writable ranges for the fast futex path), FUSE-fill flag, loader/procfs/vDSO/membarrier/
-  `mlockall` metadata, and per-mm handles for `kernel/mmu`, `kernel/cow` and `kernel/hostmem`.
-- `Vma` — one guest mapping: range, guest prot, `Backing`, `may_write`/`may_exec`,
-  `Arc<HostRegion>` (`kernel/hostmem`) + host pointer, file metadata (`file_len`, identity/version,
-  mapped-file fd, display `name`/`ino`, optional `MountPin` `mnt` whose drop reports to
-  `vfs::released`), SysV `shm`, optional `Fill`, and Linux VMA flags (locked, sticky `written`,
-  growsdown, dump/fork/noreserve, sticky commit charge `accounted`, anonymous page offset
-  `anon_pgoff`, `present_run` (known-present anonymous PTE span hint for fallback swap walks),
-  `probe_writes` (lazy pagemap write-probing flag for eager writable anonymous VMAs), logical
-  `has_anon_vma`, fork identity `anon`, and optional `ForkFileView` (`fork_view`)).
-- `FileSource` identifies the mapping contract at file mmap. A store mapping retains a duplicate of its
-  pinned host file descriptor. Tmpfs supplies allocation and quota tracking for touched pages.
-  FUSE supplies the open-specific `Fill` and shared per-inode page state.
-- `Fill` pins the mapping's FUSE open. All its VMA pieces share that handle. Mappings of one
-  FUSE inode share `FillPages`, including its sparse memfd, current size, filled runs and
-  read-ahead state. It tracks previously filled pages, shared-write baselines and writable opens.
-- `same_vma` joins adjacent pieces when their backing, permissions and permission limits, lock,
-  grows-down, dump/fork flags, noreserve, charge, name and fork identity agree. Private anonymous
-  offsets must be contiguous and the pieces must agree on whether they have an anon_vma. File mappings also require matching host and guest inode identities,
-  contiguous file offsets and compatible FUSE opens and page caches. File-less shared mappings
-  must be contiguous in one host region with the same SysV attachment.
+- `Mm` — per-process address space (`Rc<RefCell<Mm>>`, BKL-only; built unlocked at execve): owns `mmu`
+  (dropped first), `vmas: BTreeMap<start, Vma>`, deferred-release `graveyard`, layout bounds (`brk_start`/
+  `brk`/`mmap_top`/`start_stack`/`stack_low`), non-reused `id`, `shared_maps` (fast-futex writable shared
+  ranges), FUSE/loader/procfs/vDSO/membarrier/`mlockall` state, and `kernel/{mmu,cow,hostmem}` handles.
+- `Vma` — guest mapping: range, `prot`/`may_write`/`may_exec`, `Backing`, `Arc<HostRegion>` + host ptr,
+  file/mount metadata (`file_len`, identity/version, fd, `name`/`ino`, `MountPin` `mnt` → `vfs::released`),
+  SysV `shm`, `Fill`, Linux flags (locked, sticky `written`, growsdown, dump/fork/noreserve, sticky
+  `accounted` charge), `anon_pgoff`, `present_run`, `probe_writes`, `has_anon_vma`, fork `anon`, `ForkFileView` (`fork_view`).
+- `FileSource`, `Fill`, `FillPages` — file-mmap backing: store retains a dup of its pinned host fd;
+  tmpfs tracks allocation/quota; FUSE supplies an open-specific `Fill` (shared across its VMA pieces) and
+  per-inode `FillPages` (sparse memfd, size, filled/previously-filled runs, read-ahead, shared-write
+  baselines, writable opens).
+- `same_vma` — joins adjacent pieces with matching backing, prot/limits, lock, growsdown, dump/fork,
+  noreserve, charge, name, fork identity and `has_anon_vma`, plus contiguous `anon_pgoff` (private anon),
+  matching host/guest inodes + contiguous offsets + compatible FUSE open/cache (files), or contiguous
+  spans in one host region and SysV attachment (file-less shared).
 - `Backing` — `Anonymous` (private anonymous, private `/dev/zero`), `PrivateFile` (private file
   mapping), `Shared` (shared file, shared anonymous, shared `/dev/zero`, GPU or SysV shm; also
   `[vvar]`, whose host memory is shared with forked children).
 - `flags` — guest ABI values of the `MAP_*` flags the mm interprets.
-- `Refill` (private-file piece remapped at old address after `MREMAP_DONTUNMAP`), `Reread` (written
-  private-file piece reread after `MADV_DONTNEED`/`MADV_DONTNEED_LOCKED`), `AdviseRange`
-  (host-page-aligned slice of a retained `Arc<HostRegion>` for unlocked non-destructive `madvise`),
-  and `PopulateWalk`/`PopulateStep` (resumable state and unlocked `MADV_WILLNEED`/FUSE `Fill`
-  yields for `MADV_POPULATE_READ`/`MADV_POPULATE_WRITE`).
+- `Refill` / `Reread` — private-file pieces remapped after `MREMAP_DONTUNMAP` or reread after
+  `MADV_DONTNEED*`; `AdviseRange` — host-page-aligned `Arc<HostRegion>` slice for unlocked `madvise`;
+  `PopulateWalk`/`PopulateStep` — resumable state and unlocked `WILLNEED`/FUSE yields for `MADV_POPULATE_*`.
 - `WANTED` (thread-local) — the page of a `Fill` a kernel access found not read, for the dispatcher
   or a local result copy to service (`take_wanted`).
 - `UserSlice` — an unchecked guest range passed to kernel-side accessors.
@@ -82,13 +72,10 @@ Outside the module: `kernel/cow`, `kernel/hostmem`, `kernel/mmu`, `kernel/oom`, 
   `is_mapped` (`cow_break` is `kernel/cow`'s; `mmu().translate`/`fault_in` `kernel/mmu`'s).
 - **FUSE fills & kernel access**: `FillPages::new`/`size`/`has`/`window`/`window_from`/`store`/
   `notify_store`/`has_tracked`/`fd`, `take_wanted`, `has_fills`, `first_unread`,
-  `next_unread_fill`, `invalidate_fill`, `invalidate_fill_code`; `read`, `write` (breaks CoW via
-  `kernel/cow`; `for_each_page` coalesces contiguous non-CoW/non-Fill/non-tmpfs host spans and
-  expands lazy anonymous PTE fills to enclosing 2 MiB `LEAF_SPAN` windows), `pin_io` (`PinnedIo`
-  holding `HostRegion::io_write_pins` so concurrent `Mm::fork` copies instead of lending/sharing
-  and teardown defers `discard_unlent`), `translate` (no CoW break), `read_cstr`, `read_cstr_into`,
-  `read_force`, `write_kernel`, `write_force`, `populate_mlock_step`, `mapped_above`,
-  `check_mapped`.
+  `next_unread_fill`, `invalidate_fill`, `invalidate_fill_code`; `read`, `write` (`kernel/cow` CoW break;
+  `for_each_page` coalesces non-CoW/Fill/tmpfs spans and expands lazy anon fills to 2 MiB `LEAF_SPAN`),
+  `pin_io` (`PinnedIo` via `HostRegion::io_write_pins`: `fork` copies, teardown defers `discard_unlent`),
+  `translate` (no CoW break), `read_cstr`/`read_cstr_into`, `read_force`, `write_kernel`/`write_force`, `populate_mlock_step`, `mapped_above`, `check_mapped`.
 - **Files, shm, futex & introspection**: `futex_key`, `shared_maps`, `id`; `file_truncated`,
   `writably_maps`, `maps_file`, `maps_ino`, `mapped_inos`, `set_mnt`, `mapped_mounts`,
   `next_msync`, `residency_chunk`; `attach_shm`/`detach_shm`/`shm_attachments`;
@@ -105,11 +92,8 @@ Outside the module: `kernel/cow`, `kernel/hostmem`, `kernel/mmu`, `kernel/oom`, 
   exec). It adds the guard gap to the limit with saturation, clamps the sum between
   1 GiB + 8 MiB and 5/6 of the address space, then subtracts that gap from `STACK_TOP` and
   page-aligns the result. An unlimited stack still gives a top-down layout with the largest gap.
-- `STACK_TOP` is `1 << 47`, serving as a deliberate 47-bit default map window inside the 48-bit
-  `TASK_SIZE` (`1 << VA_BITS`): keeping the main stack and non-fixed `mmap` allocations below
-  `1 << 47` preserves compatibility with 47-bit NaN-boxing/pointer-tagging runtimes while fixed
-  mappings (`MAP_FIXED`, `MREMAP_FIXED`, `shmat`), `brk` and in-place `mremap` can still reach
-  `1 << 48`. A position-independent main program loads at `0x5555_5555_0000` (2/3 of `STACK_TOP`).
+- `STACK_TOP` (`1 << 47`) caps stack/non-fixed `mmap` inside 48-bit `TASK_SIZE` (`1 << VA_BITS`) for
+  47-bit NaN-boxing/tagging; fixed `mmap`/`mremap`/`shmat`, `brk`, in-place `mremap` reach `1 << 48`; PIE loads at `0x5555_5555_0000` (2/3 `STACK_TOP`).
   Non-fixed `mmap` allocates top-down from `mmap_top` (`find_free`), 2 MB-aligning mappings ≥
   `LEAF_SPAN` (2 MB) when VA space permits (falling back to page alignment) to form `kernel/mmu` L2
   superpages, skipping `stack_guard_gap` (256 pages) below grows-down VMAs, floored at
@@ -120,18 +104,13 @@ Outside the module: `kernel/cow`, `kernel/hostmem`, `kernel/mmu`, `kernel/oom`, 
 
 ### vDSO and `[vvar]`
 
-- The loader maps the vDSO image (`kernel/vdso`) as private anonymous memory written by the
-  kernel. When the image is the host's vDSO, `map_vvar` first maps `[vvar]` right below it, as
-  long as the host's vvar mappings and at the same distance, since the host's code addresses its
-  data relative to itself: a `Shared` VMA, readable only (`may_write` and `may_exec` false, so
-  mprotect asking for more is `EACCES`), on a `foreign` `HostRegion` (`kernel/hostmem`) at the
-  host's vvar address. Only its first `data` bytes (the clock data the host's code reads) count as
-  contents and get entries; the rest behaves like a file mapping past EOF (`SIGBUS`), as the
-  time-namespace page does on Linux outside a time namespace.
-- `[vvar]` is shared with forked children like any shared mapping, cannot be written by ptrace
-  (`write_force` refuses shared mappings without write permission), cannot grow (`EFAULT`, checked
-  before looking for room, Linux's `VM_DONTEXPAND`) or be duplicated by mremap (`EINVAL`), counts
-  in no resident-memory measure, writes nothing to core files, and shows as private `r--p` in maps.
+- Loader maps vDSO (`kernel/vdso`) as kernel-written private anon. For host vDSO, `map_vvar` maps
+  `[vvar]` right below at host length/distance: RO `Shared` VMA (`may_write`/`may_exec` false →
+  mprotect widening `EACCES`) on a `foreign` `HostRegion` (`kernel/hostmem`) at host vvar addr. Only
+  the first `data` clock bytes get PTEs; the rest faults `SIGBUS` like past-EOF (Linux time-ns page
+  outside a time ns). `[vvar]` shares across fork, rejects ptrace writes (`write_force` refuses
+  non-writable shared), cannot grow (`EFAULT` before space check, `VM_DONTEXPAND`) or dup (`EINVAL`),
+  counts in no RSS, dumps nothing, and shows `r--p`.
 - `vdso_svc` says whether the vDSO's clock functions are svc stubs: set at execve for the built
   image, and by `vdso_syscalls` once a process using the address space enters a time namespace
   with offsets, which writes the stubs over the host image's clock entries (`write_kernel`) and
@@ -139,100 +118,70 @@ Outside the module: `kernel/cow`, `kernel/hostmem`, `kernel/mmu`, `kernel/oom`, 
 
 ### mmap and brk
 
-- The syscall checks, in order: unknown prot bits (`PROT_BTI` and `PROT_MTE` included, `EINVAL`),
-  an unaligned offset (`EINVAL`), the map type (`MAP_SHARED_VALIDATE` with unknown flags
-  `EOPNOTSUPP`), `MAP_SHARED | MAP_ANONYMOUS | MAP_GROWSDOWN` (`EINVAL`), a fixed address below
-  `vm.mmap_min_addr` without `CAP_SYS_RAWIO` (`EPERM`; for an anonymous mapping only with a
-  non-zero length; for a file after its `EBADF` and zero-length `EINVAL`), then the file's own
-  rules (a FUSE mapping gets its `Fill`; regular store mappings check access, noexec, inode flags
-  — rejecting `MAP_SHARED` on a writable fd of an `FS_APPEND_FL` inode with `EACCES`, rejecting
-  `MAP_SHARED | PROT_WRITE` on an `FS_IMMUTABLE_FL` inode with `EPERM`, and clearing `may_write` on
-  read-only `MAP_SHARED` mappings of protected inodes so later `mprotect(PROT_WRITE)` returns
-  `EACCES` — and seals before unsharing and pinning the store object), and `MAP_LOCKED` (`EPERM` when `RLIMIT_MEMLOCK` is
-  0 without `CAP_IPC_LOCK`, `EAGAIN` above limit) or `mlockall(MCL_FUTURE)` (`EAGAIN` above limit).
-  Private anonymous mappings record grows-down and lock flags at creation. After the mapping:
-  `reap_shm` for `MAP_FIXED`, the label, write and exec denials, locking, and population
-  (`MAP_POPULATE`, `MAP_LOCKED`; a FUSE mapping's pages are read then).
+- Checks in order: unknown prot (`PROT_BTI`/`PROT_MTE` → `EINVAL`), unaligned offset (`EINVAL`),
+  map type (`MAP_SHARED_VALIDATE` unknown flags → `EOPNOTSUPP`), `MAP_SHARED|MAP_ANONYMOUS|MAP_GROWSDOWN`
+  (`EINVAL`), fixed addr < `vm.mmap_min_addr` w/o `CAP_SYS_RAWIO` (`EPERM`; anon needs len > 0; file
+  checks `EBADF` + zero-len `EINVAL` first), file rules (FUSE gets `Fill`; store checks access/noexec,
+  inode flags — `FS_APPEND_FL` writable fd `MAP_SHARED` → `EACCES`, `FS_IMMUTABLE_FL` `MAP_SHARED|PROT_WRITE`
+  → `EPERM`, clearing `may_write` on RO `MAP_SHARED` of protected inodes so later `mprotect(PROT_WRITE)`
+  is `EACCES` — and seals before unsharing/pinning), then `MAP_LOCKED` (`EPERM` if `RLIMIT_MEMLOCK == 0`
+  w/o `CAP_IPC_LOCK`, `EAGAIN` over limit) or `MCL_FUTURE` (`EAGAIN` over limit). Private anon records
+  growsdown/lock at creation; post-map runs `reap_shm` (`MAP_FIXED`), label, write/exec denials, lock,
+  populate (`MAP_POPULATE`/`MAP_LOCKED`; FUSE reads pages then).
 - Lengths round up to a page; zero or overflow is `EINVAL`.
-- With personality(2)'s `READ_IMPLIES_EXEC` (which every execve clears, as arm64's
-  `SET_PERSONALITY` does), a readable mmap is made executable unless it maps a file on a noexec
-  mount (do_mmap), mprotect adds execution to each VMA that may execute (`may_exec`, as
-  do_mprotect_pkey does per VMA, so one call can leave mixed permissions), and brk's heap is
-  executable (arm64's `VM_DATA_DEFAULT_FLAGS`); a heap grown with other permissions than its last
-  part becomes a VMA of its own.
-- `MAP_FIXED` / `MAP_FIXED_NOREPLACE`: the address must be aligned and the end at most `1 << 48`
-  (`EINVAL`, after the syscall's `EPERM`). `NOREPLACE` on an occupied range is `EEXIST`; otherwise
-  the syscall checks the request and its fd permissions before delegating placement to `Mm`.
-  Fixed replacement removes the old range before all backing and insertion work has succeeded,
-  so a later error can leave a hole.
-- A hint is rounded down to a page and raised to `vm.mmap_min_addr` (Linux's `round_hint_to_min`),
-  and used if it ends at or below `mmap_top`, is free, and stays clear of the guard gap below a
-  grows-down VMA above it.
+- `READ_IMPLIES_EXEC` (cleared on execve, arm64 `SET_PERSONALITY`): readable `mmap` gets exec unless
+  noexec mount (`do_mmap`), `mprotect` adds exec per `may_exec` VMA (`do_mprotect_pkey`, allowing mixed
+  perms), `brk` heap is exec (`VM_DATA_DEFAULT_FLAGS`; perm change splits off a new VMA).
+- `MAP_FIXED`/`MAP_FIXED_NOREPLACE`: aligned addr, end ≤ `1 << 48` (`EINVAL`, after `EPERM`);
+  `NOREPLACE` occupied → `EEXIST`; syscall validates args/fd before `Mm`; fixed replace unmaps old
+  range before backing/insert finishes (later error can leave a hole). Hints round down to page, raise
+  to `vm.mmap_min_addr` (`round_hint_to_min`), apply if end ≤ `mmap_top`, free, and clear of upper guard gap.
 - Host backing, `FileMaps` sharing, content-version trust, 16 KB alignment and commit accounting
   belong to `kernel/hostmem`. A FUSE file maps its inode's memfd with the permissions of the
   guest open, without a content version or `FileMaps` entry. Its `file_len` stays zero.
-- `new_vma` initializes `locked` from `mlockall(MCL_FUTURE)`. Once the mapping has its file
-  and page-tracking state, `insert_vma` enforces `vm.max_map_count` (default 65530, writable
-  through procfs) and builds the initial page-table entries (`kernel/mmu`). A new private
-  anonymous mapping starts with `anon_pgoff = start / PAGE_SIZE`. Until its first write, reads
-  normally translate through write-protected entries and leave its anonymous RSS at zero; however,
-  when host `/proc/self/pagemap` is readable, a non-growsdown writable eager mapping (`<= 1 MiB`)
-  that either inherits `has_anon_vma` from a mergeable neighbour or has no mergeable neighbours
-  starts with writable entries (`probe_writes`) and lazily detects stores (including zero stores)
-  via pagemap (`was_written`). Any split, move, permission change, join of two untouched mergeable
-  neighbours, discard, heap growth or fork freezes probing (`finish_write_probe`: downgrades
-  unwritten entries to read-only, shoots down, and re-samples pagemap).
-- `brk`: below `brk_start` returns the current break; growth needs the range free; it grows in
-  place inside the heap's host region when the last part is anonymous, unnamed, with the heap's
-  permissions, charge and VMA flags and no other VMA on that host range (discarding the host range
-  first), else at the first heap page reserves 256 MB (`MAP_NORESERVE`) for growth of at most that,
-  else falls back to a separate accounted anonymous mapping. Shrinking unmaps. brk caps at
-  `1 << VA_BITS`, ignores `mmap_top`, the guard gap and `vm.mmap_min_addr`, and has no `RLIMIT_DATA`
-  or `RLIMIT_AS` enforcement; under `mlockall(MCL_FUTURE)`, growth enforces `RLIMIT_MEMLOCK`
-  (returning the old break on failure) and populates new pages unless `MCL_ONFAULT`.
+- `new_vma` inherits `locked` from `MCL_FUTURE`; `insert_vma` enforces `vm.max_map_count` (default
+  65530, procfs-writable) and builds PTEs (`kernel/mmu`). Private anon starts with `anon_pgoff =
+  start / PAGE_SIZE` and RO PTEs (0 anon RSS) until first write, except with readable `/proc/self/pagemap`:
+  non-growsdown writable eager VMAs (`<= 1 MiB`) inheriting `has_anon_vma` or lacking mergeable neighbours
+  start writable (`probe_writes`) and lazily detect stores (zeros included) via pagemap (`was_written`);
+  split, move, mprotect, join of untouched neighbours, discard, heap growth or fork calls
+  `finish_write_probe` (downgrades unwritten PTEs RO, shoots down, re-samples).
+- `brk`: `< brk_start` returns current brk; growth needs free space, extending in-place in heap's host
+  region (discarding bytes first) when tail is unnamed anon with matching perms/charge/flags and no
+  other VMA on that host range, else reserving 256 MB (`MAP_NORESERVE`) at first heap page for ≤ 256 MB
+  growth, else a separate accounted anon VMA. Shrink unmaps. Caps at `1 << VA_BITS`, ignores `mmap_top`/
+  guard gap/`mmap_min_addr`/`RLIMIT_DATA`/`RLIMIT_AS`; `MCL_FUTURE` enforces `RLIMIT_MEMLOCK` (old brk
+  on failure) and populates unless `MCL_ONFAULT`.
 
 ### Mappings read on demand (`Fill`)
 
 - Page-table entries build eagerly for small/executable mappings and lazily otherwise (`kernel/mmu`);
   `PROT_NONE` gets none. FUSE and tmpfs mappings have their own fault paths. Without host pagemap,
   ordinary private file mappings prefill reads and record private host pages on first write.
-- A file backed by tmpfs pins its mapped object. Each fault (`fault_range` → `FilePages::admit` →
-  `TmpfsMapping::fault_range`) admits its demanded span against the backing mount's quota (one
-  guest page on guest page faults, or the requested span up to a 2 MiB leaf window on kernel
-  `access`/`write_kernel`; shrinking to the prefix that fits before `ENOSPC`) and maps ahead over
-  already-populated contiguous data in the 2 MiB leaf window without speculatively instantiating
-  holes. A read fault installs read-only entries. The first shared write publishes the backing
-  file's mtime and ctime. Private mappings still break host CoW and record written pages one page
-  at a time independently of the file. Hole punching (`punch_tmpfs`) and `MADV_REMOVE` revoke
-  aliases before freeing pages.
-- A `Fill` VMA keeps `file_len` 0, so `map_pages` and every other path sizing by `file_len`
-  (mprotect, mremap, fork, populate, truncation) build none of its entries, even when executable;
-  only `fault_in` does, for a page already read, and then for the runs read within its 2 MB leaf
-  range. A FUSE `INVAL_INODE` notification expires cached attributes. With a nonnegative offset,
-  it also revokes page-table entries and executable translations for the affected pages in every
-  address space that maps them, then marks those pages stale in `FillPages`.
-  A subsequent fill refreshes the EOF, including for a fault beyond the old end. Shared writable
-  aliases get a baseline so writeback can send only contiguous runs of changed bytes.
-- Reading a page (`kernel/fuse`'s `fill`): `Fill::window` picks the pages not read around it
-  (normally 32 starting 16 before it; from it, twice the last read when it continues that read or
-  twice the run read just before it, between 32 and 512), clipped to the runs already read and
-  EOF; the daemon is asked with the BKL released, and `store` writes the pages still missing into
-  the memfd with `pwrite`, recording the whole window only when the reply reaches `Fill::size`,
-  the single page on confirmed 0-byte EOF, and otherwise only complete pages returned (`kernel/fuse`
-  retries from `window_from(page)` when backward read-around stopped short and loops on partial-page
-  replies until a full page or EOF). A refill merges local shared stores with the new daemon bytes.
-  Private host copies retain their contents.
-- A kernel access (`read`, `write`, `read_cstr`, `write_kernel`) meeting a page of a `Fill` mapping
-  not yet read fails with the internal `FUSE_RETRY` and records the page in `WANTED`; the syscall
-  dispatcher normally reads it and runs the syscall again (`kernel/process`). Socket result
-  copies fill pages locally after recvfrom, recvmsg and accept4 have obtained their result;
-  recvmmsg handles missing pages within the current record. `read` and `write` go page by page, so a copy can stop partway. `write_kernel` checks
-  the whole range first (any permission,
-  `PROT_NONE` fills included), before changing anything, and gives `PROT_NONE` anonymous memory it
-  writes prot-0 entries.
-- Debugger reads (`read_force`) walk page by page without changing VMA permissions. CoW loans
-  read the owner's page and untouched anonymous reservations read as zeros. File growth refreshes
-  the accessible extent. Holes and foreign vvar pages stop the read. A missing FUSE page requests a fill.
+- Tmpfs files pin their mapped object. Faults (`fault_range` → `FilePages::admit` → `TmpfsMapping::fault_range`)
+  admit their span against mount quota (1 page on guest fault; up to 2 MiB leaf on kernel `access`/
+  `write_kernel`, shrinking to fitting prefix before `ENOSPC`) and map ahead over already-populated
+  contiguous data in the 2 MiB leaf without instantiating holes. Read faults install RO PTEs; first
+  shared write updates mtime/ctime; private mappings break host CoW per page independently. `punch_tmpfs`
+  and `MADV_REMOVE` revoke aliases before freeing pages.
+- `Fill` VMAs keep `file_len` 0, so `map_pages` and `file_len`-sized paths (mprotect, mremap, fork,
+  populate, truncate) build no PTEs even when exec; only `fault_in` builds already-read runs in a
+  2 MiB leaf. FUSE `INVAL_INODE` expires attrs and (offset ≥ 0) revokes PTEs/exec translations across
+  all mapping `Mm`s, marking `FillPages` stale; next fill refreshes EOF (including past old end).
+  Shared writable aliases keep baselines for dirty-run writeback.
+- Reading (`kernel/fuse::fill`): `Fill::window` picks unread pages around target (32 starting 16
+  before; forward sequential doubles last read or prior run, 32–512), clipped to read runs and EOF.
+  Daemon I/O runs unlocked; `store` `pwrite`s missing pages to memfd, recording whole window if reply
+  hits `Fill::size`, 1 page on 0-byte EOF, else complete pages (`kernel/fuse` retries from `window_from(page)`
+  if backward read-around stopped short, and loops partial pages until full page/EOF). Refill merges
+  local shared stores with daemon bytes; private host copies keep theirs.
+- Kernel accesses (`read`, `write`, `read_cstr`, `write_kernel`) hitting unread `Fill` pages return
+  internal `FUSE_RETRY` + `WANTED`; dispatcher fills and retries (`kernel/process`). Socket result
+  copies (`recvfrom`/`recvmsg`/`accept4`; per-record `recvmmsg`) fill locally. `read`/`write` walk
+  page-by-page (may stop partway); `write_kernel` prechecks the whole range (any prot, `PROT_NONE`
+  fills included) before mutating, giving `PROT_NONE` anon prot-0 PTEs. Debugger `read_force` walks
+  page-by-page without changing prot: CoW reads owner, untouched anon reads 0, file growth refreshes
+  extent, holes/`[vvar]` stop, missing FUSE requests fill.
 
 ### Guest page faults (task run loop, under the BKL, in this order)
 
@@ -262,153 +211,102 @@ Otherwise the populated page-table levels determine the translation-fault level.
 
 - VMAs are only ever split (`split_at` advances file or anonymous page offsets and host pointers), never merged;
   `same_vma` tells which pieces Linux would have as one VMA.
-- `munmap`: an unaligned address, zero or overflowing length or an end past 2^48 is `EINVAL`;
-  a three-way VMA split at `vm.max_map_count` returns `ENOMEM`. It coalesces contiguous mapped
-  spans and pre-demotes their partial boundary superpages before recalling or taking CoW loans
-  or splitting VMAs. A demotion `ENOMEM` preserves VMAs, guest translations, backing regions and
-  loans. CoW recall can also return `ENOMEM` before the endpoint splits. On success, munmap
-  splits at the endpoints, unmaps each prepared span and moves removed VMAs' backing regions
-  to the `graveyard`. It clears `vdso` when overlapping it, sets `dirty`, records executable
-  ranges in `code_ranges`, returns borrowed pages (`kernel/cow`), and the syscall reaps SysV
-  segments left without attachments.
-- `mprotect` (`protect`, Linux's `do_mprotect_pkey`): unknown prot bits (`PROT_SEM` included) or
-  both grows bits are `EINVAL` at once; an unaligned address is `EINVAL`; then a length of 0
-  succeeds and an overflowing one is `ENOMEM`. The VMAs from the first one ending above the
-  address are changed in turn; a gap (`ENOMEM`) or a VMA refusing the permissions
-  (`may_write`/`may_exec`, `EACCES`) stops it with the VMAs before it already changed. With
-  `PROT_GROWSDOWN` the range starts at the start of the Linux VMA holding that first VMA, which
-  must grow down (`EINVAL`; `ENOMEM` if it starts at or above the end), so it reaches the parts the
-  mapping grew by; `PROT_GROWSUP` is `EINVAL` once the range is found. A `cow` VMA is copied
-  (`unshare` remaps ordinary files and copies private pages as at fork; a `Fill` VMA maps its host file privately again, copies the pages
-  it changed after reading them and drops its entries) before it becomes writable, and a
-  `reserved` region gets real host memory (`back_reserved`) before it becomes accessible.
-  Adding private write permission sets the commit charge unless the mapping has `MAP_NORESERVE`.
-  The charge survives later permission changes. Tracked file pages (`v.pages`) prepare range
-  boundaries and restrict existing entries in place to `new & !prot::WRITE` (preserving readable
-  page watches, prefilling read-only when leaving `PROT_NONE`, and letting detached pages regain
-  write access on demand) rather than unmapping. A successful permission downgrade sets `dirty`.
-  Before granting access to a private anonymous VMA
-  with fork CoW pages, mprotect installs their owner-backed entries under the old non-writable
-  permissions. It then changes the range permissions and grants write only outside the CoW pages.
-  A failed permission change preserves the VMA prot and queues any needed rollback invalidation.
-- `mremap`: the syscall checks the flags (`MREMAP_DONTUNMAP` needs equal lengths) and gives `EPERM`
-  for a fixed target below `vm.mmap_min_addr` before anything else. Then Linux's order: no mapping
-  at the old address is `EFAULT`; a `MREMAP_FIXED` target is validated (`EINVAL`) and unmapped and
-  a shrunk tail unmapped; then the rest of the old range must lie in one Linux VMA (`EFAULT`,
-  `same_vma`, as Linux before 6.17). Shrinking without a target only unmaps the tail. Growing in
-  place needs the old end to be a VMA end, free space above clear of `stack_guard_gap` below any
-  grows-down VMA above it, and a new end at or below `1 << VA_BITS`.
-  Reservations grow without host memory. Shared anonymous and SysV mappings extend the same
-  VMA, with contents capped at the original backing extent. A backed private anonymous tail
-  can reuse spare bytes when its host region has a single strong reference. It discards those
-  bytes before mapping them. Other supported mappings allocate a continuation piece with the next offset
-  and the source flags. A file or FUSE continuation maps the next part of the same file.
-  Private anonymous moves preserve offsets across all pieces of a faulted logical VMA.
-  For a logical VMA without an anonymous identity the destination address supplies the new
-  offset, so it can join compatible neighbours. In either case an extension continues from
-  the moved tail. Growing or duplicating (`old_len == 0`) a locked VMA enforces `RLIMIT_MEMLOCK` (`EAGAIN`, after
-  any `MREMAP_FIXED` target unmap) and populates the added pages unless `MCL_ONFAULT`. Shared
-  anonymous memory and SysV
-  segments retain their backing region across shrink, growth and moves. Regrown pages alias the
-  original bytes up to the region's end and fault with `SIGBUS` beyond it. A move settles CoW
-  (`kernel/cow`), re-points host memory, moves PTEs, updates SysV shm attach bases (`v.shm`),
-  and updates `vdso` when the whole vDSO moves (or clears it on a partial move).
-- A move (growing with `MREMAP_MAYMOVE` and no room in place, `MREMAP_FIXED`,
-  `MREMAP_DONTUNMAP`) is `ENOMEM` before anything changes unless the address space stays more
-  than three VMAs below `vm.max_map_count` (`move_room`, 6.1's `move_vma`), with two more for a
-  target's unmapping (`mremap_to`); the moved pieces go back in without the count check
-  (`place_moved_vma`). A partial PTE move on allocation failure is reversed into the retained
-  source tables before the temporary destination ranges are withdrawn. Executable ranges at
-  the temporary destination are queued for invalidation.
-- `MREMAP_DONTUNMAP` follows 6.1's order: no mapping at the old address `EFAULT`, the target
-  `EINVAL`, the margin `ENOMEM`, the target unmapped, the one-VMA rule `EFAULT`; it splits nothing
-  before these, then checks room for the endpoint splits and the actual remnant count.
-  At the old address an empty anonymous remnant retains the source `anon_pgoff`, unlinks
-  `anon_vma` and fork identity only on a whole-VMA move (leaving partial remnants joined with
-  remaining source siblings and not merging whole-VMA remnants with faulted neighbours until a
-  later merge), and clears `VM_LOCKED` across the entire old VMA while the moved range stays
-  locked. Private file remnants likewise clear fork `anon` only on a whole-VMA move: a private
-  FUSE remnant remaps the same memfd, retaining its fill and zero `file_len`, and ordinary
-  private files produce one `Refill` per compatible run of retained descriptors, mount pins,
-  tmpfs mappings and interpreter opens (mapped even after unlink). Shared aliases coalesce over
-  contiguous spans in the same host region and attachment with compatible pins and one
-  accessible prefix. All remnants keep their source permissions, commit charge and non-lock
-  flags. The syscall calls `reap_shm`. `shmat` also refuses non-zero fixed addresses below
-  `vm.mmap_min_addr` without `CAP_SYS_RAWIO` (`EPERM`).
-- `mremap` with an old length of 0 duplicates (6.1's "duplicate shm area"): the VMA holding the
-  address (`EFAULT` if none) must be shared (`EINVAL`; a `MREMAP_FIXED` target is validated and
-  unmapped before this check), and without `MREMAP_MAYMOVE` it is `ENOMEM`; no margin is asked. A
-  shared file mapping maps the file again from the address's offset for the new length; shared
-  anonymous memory and System V segments get a VMA on the same host memory, which may run past the
-  source VMA to the end of the region and past that has no contents (`SIGBUS`). A segment's copy is
-  a new attach base, so it counts as one more attachment and shmdt at its address detaches it.
-- `remap_file_pages`: a non-zero prot is `EINVAL`; start and size are rounded down; the range must
-  lie in contiguous shared pieces of one host file with matching protections. FUSE pieces must
-  also retain the same open handle and access limits (`EINVAL` on mismatch; shared anonymous memory
-  and segments are refused); it maps the file again with `MAP_SHARED | MAP_FIXED`, keeping the
-  label, FUSE page source, exec denial and lock, and populates unless `MAP_NONBLOCK`.
-- `msync`: flags and alignment `EINVAL`, overflow `ENOMEM`, zero-length succeeds; walks VMAs in
-  order via `next_msync`, skipping unmapped gaps (returning `ENOMEM` at the end), stopping on
-  `MS_INVALIDATE` over a locked VMA with `EBUSY` (preceding earlier gaps), and under `MS_SYNC`
-  syncing each shared host file slice with the BKL released (retaining `Arc<HostRegion>`) and
-  writing changed shared FUSE pages to the daemon before requesting a data sync. `mincore`:
-  alignment `EINVAL`, range overflow or above `1 << VA_BITS` `ENOMEM`, `vec` above `1 << VA_BITS`
-  `EFAULT`; walks contiguous mapped VMAs from `addr` in chunks of at most `PAGE_SIZE` pages
-  (`residency_chunk`), writing each chunk to `vec` without growing the stack and stopping at the
-  first unmapped page (`ENOMEM`) or write fault (`EFAULT`); reserved pages report 0 and borrowed
-  pages 1.
-- `mlock`/`mlock2`/`munlock` follow `do_mlock` / `apply_vma_lock_flags`: the length plus the offset
-  in the page is page-aligned with wrapping arithmetic; after mlock's `RLIMIT_MEMLOCK` check
-  (`EPERM` with a limit of 0, `ENOMEM` above it; skipped with `CAP_IPC_LOCK`) a range that wraps
-  past the end is `EINVAL` and an empty one succeeds; `set_locked` walks contiguous mapped VMAs
-  from `start` and stops at the first unmapped gap (`ENOMEM`, leaving earlier contiguous VMAs
-  updated, later VMAs untouched, and skipping population); on a fully mapped lock without
-  `MLOCK_ONFAULT`, `populate_range` (`populate_mlock_step`) fetches missing FUSE `Fill` pages
-  unlocked via `fuse::fill` (`ENOMEM` on daemon read error, `EINTR` on kill), stops at the first
-  `PROT_NONE` VMA (`ENOMEM`, leaving the range locked), skips read-only private anonymous VMAs so
-  RSS stays 0 and CoW stays intact, and settles CoW plus atomically write-faults writable private
-  anonymous VMAs so real private host pages are resident. `mlockall(MCL_CURRENT)` checks the whole
-  size (`PROT_NONE` reservations included) against the limit, locks every VMA and populates
-  (including cold FUSE `Fill` pages, ignoring errors) unless `MCL_ONFAULT`; `MCL_FUTURE` without
-  `MCL_CURRENT` checks only `RLIMIT_MEMLOCK != 0` (`EPERM` when 0 without `CAP_IPC_LOCK`), and new
-  mappings (`mmap`, `brk` growth, `shmat`) and growth of locked VMAs (`mremap`, `grow_down` stack
-  growth) enforce `RLIMIT_MEMLOCK`.
-- `madvise`: alignment/length/unknown advice (counted as unimplemented) `EINVAL`; length 0 succeeds.
-  Walks mapped VMAs in order like Linux 6.1's `do_madvise`: unmapped gaps are skipped and reported
-  as `ENOMEM` at the end, while per-VMA errors (`EINVAL` on locked/foreign/GPU VMAs for
-  `MADV_DONTNEED`/`FREE`/`COLD`/`PAGEOUT`, foreign/GPU for `MADV_DONTNEED_LOCKED`, non-private-anon
-  or `[vdso]` for `MADV_FREE`, non-private-anon for `MADV_WIPEONFORK`, `EINVAL`/`EACCES` for
-  `MADV_REMOVE`, `EINVAL`/`EFAULT` for `MADV_POPULATE_READ`/`WRITE`, or split `ENOMEM`) stop
-  immediately (overriding earlier gaps) while leaving earlier mapped portions applied. Flag advice
-  (`DONTDUMP`/`DODUMP`, `WIPEONFORK`/`KEEPONFORK`, `DONTFORK`/`DOFORK`) splits each mapped VMA at
-  slice ends and sets the flag. `MADV_COLD`/`MADV_PAGEOUT` (`check_lru`) and `MADV_FREE`
-  (`check_free`) validate every mapped VMA in range via `check_vmas`. Non-destructive hints
-  (`NORMAL`/`RANDOM`/`SEQUENTIAL`/`WILLNEED`) prefill RO non-FUSE file soft PTEs up to 4 GB/call
-  for `WILLNEED` (`prefill_file_ptes`), fetch missing FUSE `Fill` pages unlocked for `WILLNEED`
-  (`willneed_fuse` → `next_unread_fill` + `fuse::fill`, advisory regardless of guest `prot`), and
-  forward non-FUSE ranges to `appine_hal::advise` unlocked via coalesced `AdviseRange`s clipped to
-  `file_len` (skipping reserved/foreign/GPU/`Fill` VMAs; `NORMAL`/`RANDOM`/`SEQUENTIAL` file-backed
-  only; `WILLNEED` skips untouched anon) before reporting any gap as `ENOMEM`.
-- `MADV_POPULATE_READ` / `MADV_POPULATE_WRITE` (`madvise_populate` → `populate_step`): check guest
-  `PROT_READ`/`PROT_WRITE` and refuse `[vvar]`/GPU (`EINVAL`), refresh stale file extents, fault
-  tmpfs (charging quota and updating shared write times) and software-tracked private files, read
-  missing FUSE `Fill` pages unlocked (`EINTR` on signal, `EFAULT` on read error or past EOF), warm
-  regular file slices ≥ 64 KB with unlocked `MADV_WILLNEED`, preserve CoW on `POPULATE_READ` while
-  settling CoW and atomically write-faulting (`populate_write_host`) on `POPULATE_WRITE`, install
-  missing soft PTEs, and stop with `EFAULT` at the first page past EOF.
-- `MADV_DONTNEED` / `MADV_DONTNEED_LOCKED` (`discard_range`): `MADV_DONTNEED_LOCKED` allows
-  `mlock`'d VMAs without unlocking them; both refuse foreign (`[vvar]`) and GPU VMAs (`EINVAL`).
-  Private anonymous pages read as zero after discard. After freezing write probing, non-vDSO
-  private anonymous discard (`discard_with_pagemap`) keeps soft-MMU entries and expires
-  `PageWatch`es when `/proc/self/pagemap` is readable; only when pagemap is unreadable and the
-  range has present entries or CoW loans does it pre-demote partial superpages before settling CoW,
-  discarding host bytes, clearing `present_run`, zapping soft PTEs and setting `dirty`.
-  Tracked private file pages lose their entries before discard clears their private-copy records.
-  Written private file pages before EOF unshare first if marked `cow` (so reverting never corrupts a fork peer), then
-  revert via `kernel/hostmem`'s `discard_file_host` (whole host pages) and `Reread`s read from the
-  store (`fill_private`, zeros past EOF or open failure; `Fill` partial host pages reread from its
-  memfd so entries stay). Executable ranges queue code invalidation; shared/unwritten VMAs
-  untouched; vDSO refills from kernel image (with svc stubs when `vdso_svc`).
+- `munmap`: unaligned addr, 0/overflow len, end > 2^48 → `EINVAL`; 3-way split at `max_map_count` →
+  `ENOMEM`. Coalesces spans and pre-demotes partial boundary superpages before recalling/taking CoW
+  loans or splitting (demotion `ENOMEM` preserves VMAs/PTEs/regions/loans; CoW recall can `ENOMEM`
+  before splits). Splits endpoints, unmaps spans, moves removed regions to `graveyard`, clears `vdso`
+  on overlap, sets `dirty`, queues exec `code_ranges`, returns loans (`kernel/cow`), syscall calls `reap_shm`.
+- `mprotect` (`protect`, `do_mprotect_pkey`): unknown prot (`PROT_SEM`)/both grows bits/unaligned addr
+  → `EINVAL`; len 0 succeeds; overflow → `ENOMEM`. Walks VMAs from first ending above addr; gap (`ENOMEM`)
+  or denied `may_write`/`may_exec` (`EACCES`) stops leaving earlier VMAs changed. `PROT_GROWSDOWN`
+  extends start to first VMA's Linux-VMA start (must be growsdown → `EINVAL`; `ENOMEM` if start ≥ end);
+  `PROT_GROWSUP` → `EINVAL`. `unshare` copies `cow` VMAs (files remap/copy private pages; `Fill` remaps
+  privately, copies changed read pages, drops PTEs) before writable; `back_reserved` backs `reserved`
+  regions before accessible. Adding private write sets persistent commit charge (unless `MAP_NORESERVE`).
+  Tracked file pages (`v.pages`) prepare boundaries and restrict PTEs in place to `new & !prot::WRITE`
+  (keeping readable `PageWatch`es, prefilling RO from `PROT_NONE`, letting detached pages regain write on
+  demand) instead of unmapping. Downgrades set `dirty`. On private anon with fork CoW pages, installs
+  owner-backed PTEs under old non-writable perms before granting access, then grants write only outside
+  CoW pages. Failures preserve VMA prot and queue rollback invalidation.
+- `mremap`: checks flags (`MREMAP_DONTUNMAP` needs equal lengths) and fixed target < `mmap_min_addr`
+  (`EPERM`) first. Linux order: unmapped old addr `EFAULT`; `MREMAP_FIXED` target validated (`EINVAL`)/
+  unmapped and shrunk tail unmapped; rest must lie in one Linux VMA (`same_vma`, pre-6.17 → `EFAULT`).
+  Non-fixed shrink just unmaps tail. In-place growth needs old end at VMA end, free space clear of upper
+  growsdown `stack_guard_gap`, end ≤ `1 << VA_BITS`: reservations grow unbacked; shared anon/SysV extend
+  same VMA (contents capped at original backing extent, `SIGBUS` past); backed private anon tails reuse
+  exclusively-held spare host bytes (discarding first); others add continuation VMA with next offset/flags
+  (file/FUSE maps next slice). Private anon moves keep offsets across faulted logical VMAs, else take
+  destination offset (allowing neighbour join); extensions continue from moved tail. Growing/duplicating
+  (`old_len == 0`) locked VMAs enforces `RLIMIT_MEMLOCK` (`EAGAIN`, after `MREMAP_FIXED` unmap) and
+  populates unless `MCL_ONFAULT`. Shared anon/SysV keep backing across shrink/growth/move (regrown pages
+  alias original bytes). Moves settle CoW (`kernel/cow`), re-point host memory, move PTEs, update `v.shm`
+  attach bases, and update/clear `vdso` (whole vs partial).
+- Moves (`MREMAP_MAYMOVE` without in-place room, `MREMAP_FIXED`, `MREMAP_DONTUNMAP`) return `ENOMEM`
+  up front unless > 3 VMAs below `max_map_count` (`move_room`, 6.1 `move_vma`; +2 for target unmap in
+  `mremap_to`); moved pieces insert via `place_moved_vma` without rechecking. PTE-move OOM rolls back
+  partial moves into retained source tables before withdrawing temp destination ranges and queueing
+  exec invalidation there.
+- `MREMAP_DONTUNMAP` (6.1 order): unmapped old addr `EFAULT`, target `EINVAL`, margin `ENOMEM`, unmap
+  target, one-VMA `EFAULT`; then checks split + remnant room. Empty anon remnants keep `anon_pgoff`,
+  unlink `anon_vma`/fork identity only on whole-VMA moves (partial stays joined with siblings; whole
+  avoids merging with faulted neighbours until later), and clear `VM_LOCKED` across whole old VMA while
+  moved range stays locked. Private file remnants also clear fork `anon` only on whole-VMA moves: FUSE
+  remaps memfd keeping fill/`file_len == 0`; ordinary files emit one `Refill` per compatible run of
+  retained fds/mount pins/tmpfs/interpreter opens (even after unlink). Shared aliases coalesce across
+  contiguous spans in one host region/attachment with compatible pins and accessible prefix. Remnants
+  keep perms/charge/non-lock flags. Syscall calls `reap_shm`. `shmat` also refuses non-zero fixed addr
+  < `vm.mmap_min_addr` w/o `CAP_SYS_RAWIO` (`EPERM`).
+- `mremap` `old_len == 0` duplicates (6.1 shm dup): unmapped `EFAULT`; must be shared (`EINVAL`, after
+  `MREMAP_FIXED` validate/unmap); w/o `MREMAP_MAYMOVE` → `ENOMEM`; no margin check. Shared files remap
+  from addr's offset for `new_len`; shared anon/SysV share host region (up to end, `SIGBUS` past), SysV
+  copies creating a new attach base (`shmdt` detaches it).
+- `remap_file_pages`: non-zero prot `EINVAL`; rounds start/size down; needs contiguous shared pieces of
+  one host file with matching prot (and FUSE open/access limits; rejects shared anon/SysV → `EINVAL`);
+  remaps `MAP_SHARED|MAP_FIXED`, keeping label/FUSE/exec denial/lock; populates unless `MAP_NONBLOCK`.
+- `msync`: bad flags/align `EINVAL`, overflow `ENOMEM`, len 0 ok; walks via `next_msync`, skips gaps
+  (`ENOMEM` at end), `MS_INVALIDATE` on locked VMA → `EBUSY` (overrides gaps); `MS_SYNC` syncs shared
+  host slices unlocked (`Arc<HostRegion>`) and writes dirty shared FUSE pages before data sync. `mincore`:
+  align `EINVAL`, overflow/end > `1 << VA_BITS` `ENOMEM`, `vec > 1 << VA_BITS` `EFAULT`; walks contiguous
+  VMAs in ≤ `PAGE_SIZE`-page `residency_chunk`s without stack growth, stopping at gap (`ENOMEM`) or write
+  fault (`EFAULT`); reserved → 0, borrowed → 1.
+- `mlock`/`mlock2`/`munlock` (`do_mlock`/`apply_vma_lock_flags`): wraps `len + (addr & PAGE_MASK)` up to
+  page; after `RLIMIT_MEMLOCK` check (`EPERM` if 0, `ENOMEM` over; skipped w/ `CAP_IPC_LOCK`), wrap-past-end
+  is `EINVAL`, empty ok. `set_locked` walks contiguous VMAs from `start`, stopping at gap (`ENOMEM`, earlier
+  updated, later untouched, no populate). Fully mapped lock w/o `MLOCK_ONFAULT` runs `populate_range`
+  (`populate_mlock_step`): fetches FUSE `Fill` unlocked (`ENOMEM` read error, `EINTR` kill), stops at
+  `PROT_NONE` (`ENOMEM`, leaving locked), skips RO private anon (0 RSS, CoW intact), settles CoW +
+  atomically write-faults writable private anon. `mlockall(MCL_CURRENT)` checks total size (incl. `PROT_NONE`)
+  vs limit, locks all VMAs and populates (cold FUSE incl., ignoring errors) unless `MCL_ONFAULT`;
+  `MCL_FUTURE` alone checks only `RLIMIT_MEMLOCK != 0` (`EPERM` w/o `CAP_IPC_LOCK`); new mappings (`mmap`/
+  `brk`/`shmat`) and locked growth (`mremap`/`grow_down`) enforce `RLIMIT_MEMLOCK`.
+- `madvise`: align/len/unknown advice (counted unimplemented) → `EINVAL`; len 0 ok. Walks VMAs (6.1
+  `do_madvise`): skips gaps (`ENOMEM` at end), per-VMA errors (`EINVAL` on locked/foreign/GPU for
+  `MADV_DONTNEED`/`MADV_FREE`/`MADV_COLD`/`MADV_PAGEOUT`, foreign/GPU for `MADV_DONTNEED_LOCKED`,
+  non-private-anon/`[vdso]` for `MADV_FREE`, non-private-anon for `MADV_WIPEONFORK`, `EINVAL`/`EACCES`
+  for `MADV_REMOVE`, `EINVAL`/`EFAULT` for `MADV_POPULATE_READ`/`MADV_POPULATE_WRITE`, split `ENOMEM`)
+  stop immediately (overriding gaps), leaving earlier slices applied. Flag advice (`DONTDUMP`/`DODUMP`/
+  `WIPEONFORK`/`KEEPONFORK`/`DONTFORK`/`DOFORK`) splits at slice ends. `MADV_COLD`/`MADV_PAGEOUT`
+  (`check_lru`) and `MADV_FREE` (`check_free`) validate via `check_vmas`. Non-destructive hints (`NORMAL`/
+  `RANDOM`/`SEQUENTIAL`/`WILLNEED`) prefill RO non-FUSE file PTEs ≤ 4 GB/call (`prefill_file_ptes`) and
+  fetch FUSE `Fill` unlocked (`willneed_fuse` → `next_unread_fill` + `fuse::fill`, advisory regardless of
+  prot) for `WILLNEED`, forwarding non-FUSE slices clipped to `file_len` to `appine_hal::advise` unlocked
+  via coalesced `AdviseRange`s (skipping `reserved`/foreign/GPU/`Fill`; `NORMAL`/`RANDOM`/`SEQUENTIAL`
+  file-only; `WILLNEED` skips untouched anon) before reporting gaps `ENOMEM`.
+- `MADV_POPULATE_READ`/`MADV_POPULATE_WRITE` (`madvise_populate` → `populate_step`): checks `PROT_READ`/
+  `PROT_WRITE`, refuses `[vvar]`/GPU (`EINVAL`), refreshes stale extents, faults tmpfs (quota + shared
+  write times) and tracked private files, reads FUSE `Fill` unlocked (`EINTR` signal, `EFAULT` read error/
+  EOF), warms regular slices ≥ 64 KB with unlocked `MADV_WILLNEED`, keeps CoW on `POPULATE_READ` vs
+  settles CoW + atomic write-fault (`populate_write_host`) on `POPULATE_WRITE`, installs missing PTEs,
+  stops `EFAULT` past EOF.
+- `MADV_DONTNEED`/`MADV_DONTNEED_LOCKED` (`discard_range`): `LOCKED` allows `mlock`'d VMAs without
+  unlocking; both refuse `[vvar]`/GPU (`EINVAL`). Private anon reads 0 after discard: after freezing
+  `probe_writes`, non-vDSO `discard_with_pagemap` keeps PTEs and expires `PageWatch`es if `/proc/self/pagemap`
+  is readable; only when unreadable and range has PTEs/CoW loans does it pre-demote partial superpages,
+  settle CoW, discard host bytes, clear `present_run`, zap PTEs, set `dirty`. Tracked private file pages
+  lose PTEs before clearing records. Written private file pages before EOF `unshare` `cow` first, then
+  revert via `discard_file_host` (whole host pages) and `Reread`s (`fill_private`, zeros past EOF/open
+  fail; `Fill` partial host pages reread memfd keeping PTEs). Exec ranges queue invalidation; shared/
+  unwritten untouched; vDSO refills from kernel image (svc stubs if `vdso_svc`).
 - `MADV_REMOVE` (`remove`): per-VMA check (`EINVAL` on locked, private anon or GPU; `EACCES` on
   other private or never-writable, 6.7); shared host ranges use `remove_host`, tmpfs and FUSE
   ranges punch holes through tmpfs / the daemon. Neither path requests code invalidation.
@@ -444,9 +342,8 @@ Otherwise the populated page-table levels determine the translation-fault level.
   caching or mprotect, only the previously inaccessible tail gets a fresh private host mapping.
 - Before a host shrink, truncate, ftruncate and `O_TRUNC` clip the file's accessible extent
   in each address space they can borrow, queue executable invalidation, mark it dirty and sync
-  it. Clipping removes translations after EOF (clearing enclosing 2 MiB superpages without
-  allocation on demotion OOM) so later guest access faults. A later host truncate error can
-  instead leave the logical EOF shorter than the host file.
+  it. Clipping removes post-EOF PTEs (clearing enclosing 2 MiB superpages w/o alloc on demotion OOM) so
+  later guest access faults; a later host truncate error can leave logical EOF shorter than host file.
 - Private and shared mmap of a named store file first give the inode its own backing object, including
   on read-only opens. The VMA retains a duplicate of its locked open description. Splits, fork
   and mremap keep the pin. Cached host views use a separate open description. Clones and overlay
@@ -466,9 +363,8 @@ Otherwise the populated page-table levels determine the translation-fault level.
   plus the same label). procfs escapes a newline in a file name as `\012`.
 - `dump_regions` includes the VMA starting at the recorded vDSO address before consulting
   dump flags. Other foreign or `MADV_DONTDUMP` pieces have zero payload. `ANON_PRIVATE`
-  selects private anonymous pieces with an anon_vma (or detected via `was_written`) and private file
-  pieces that have been written or currently allow writes. File and ELF-header filters cover
-  further cases. The
+  selects private anon with anon_vma (or `was_written`) and private file pieces written or writable.
+  File and ELF-header filters cover further cases. The
   writer leaves holes for absent pages in sparse regions and fetches missing FUSE pages before
   inspecting headers or copying segments.
 - `Mm` drop leaves its code group (`kernel/mmu`), releases CoW (`kernel/cow`), defers the page
@@ -523,11 +419,10 @@ Otherwise the populated page-table levels determine the translation-fault level.
 - Guest pages are always 4 KB (`AT_PAGESZ` 4096) whatever the host page size.
 - Host `mincore` reports pages swapped to zram as absent; RSS (`kernel/oom`), mincore(2), pagemap
   and core-dump holes still use mincore.
-- `clip_file_mappings`, `punch_tmpfs` and `invalidate_fill` use `unmap_or_clear_superpages`: when partial 2 MiB
-  superpage demotion hits OOM, `Mmu::unmap_noalloc` clears only partially covered L2 superpages
-  whole (leaving L3 tables narrowed to the exact range so adjacent anonymous VMAs in the same
-  2 MiB slot are never touched) and expires `PageWatch`es across the widened range; still-valid
-  file or FUSE pages fault back in on next access with intact contents and baselines.
+- `clip_file_mappings`, `punch_tmpfs`, `invalidate_fill` use `unmap_or_clear_superpages`: on partial
+  2 MiB demotion OOM, `Mmu::unmap_noalloc` clears only partially covered L2 superpages whole (L3 tables
+  stay exact so adjacent anon VMAs in the slot stay untouched) and expires `PageWatch`es over the widened
+  range; valid file/FUSE pages refault with intact contents and baselines.
 
 ## Confirmed bugs / technical debt
 

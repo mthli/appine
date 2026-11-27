@@ -1,459 +1,148 @@
 # engine/dbt Map
 
 > Static understanding snapshot, not a decision history.
-> See `.agents/decisions/engine/dbt.md` for the paired decision history (decisions from before the split remain in `.agents/decisions/engine.md`: D6–D10, D13–D16, D18, D23, D25, D27–D29, and the Tier 1 halves of D2, D5, D17, D20, D22 and D24).
+> See `.agents/decisions/engine/dbt.md` for the paired decision history (pre-split decisions remain in `.agents/decisions/engine.md`: D6–D10, D13–D16, D18, D23, D25, D27–D29, and the Tier 1 halves of D2, D5, D17, D20, D22 and D24).
 >
-> Verified: 2026-11-23 (full mapping: 5 research concerns; 18 claims checked by 3 independent verifiers — 15 confirmed and 3 partial, all corrected below; bugs and debts recorded)
->
-> Maintained: 2026-11-27 (targeted verification only since the full mapping; latest change: 2 MiB STLB in-cache memop helpers and in-cache/exec_memop strlen, strcmp and strncmp)
+> Verified: 2026-11-27 (full mapping: 5 research concerns; 17 claims checked by an independent verifier — 15 confirmed and 2 partial, all corrected below; 0 confirmed bugs)
 
 ## Responsibilities
 
 `engine/dbt` is Appine's Tier 1 same-ISA dynamic binary translator for guest aarch64 user code:
 
-- translating guest basic blocks into a shared W^X code cache: ALU, FP, NEON and barrier
-  instructions are copied verbatim (renaming stolen registers), memory accesses get inline
-  soft-TLB checks with grouped same-base/affine/`M_REG` checks and a shared out-of-line refill
-  routine, canonical constant-stride and register-stride self-loops get guarded strip-mined native
-  fast loops, and blocks link directly or through per-thread jump caches and a shadow return stack;
-- executing translated code under `engine`'s host fault guard, accelerating registered libc memops
-  through in-cache same-page helpers and page-validated host routines, re-entering Tier 0 for any
-  untranslated instruction, and keeping exceptions precise;
-- lock-free translation-table lookups, batched forwarding-stub retirement, content-based and
-  `ic ivau` invalidation, the process-global template arena, instance/thread pooling with stale
-  reuse and lazy page revival, code-group sharing (`DbtSpace` / `Dbt`), and periodic unmapping of
-  written code pages.
+- translating guest basic blocks into a shared 128 MB W^X code cache: verbatim ALU/FlagM/FP/NEON/barrier emission with stolen-register renaming, inline 4 KiB soft-TLB and grouped checks backed by a 2 MiB STLB refill routine, strip-mined native fast loops, direct chaining, jump caches and shadow return prediction;
+- running translated code under `engine`'s host fault guard, accelerating registered libc memops via in-cache TLB/STLB helpers and page-validated host routines, and falling back to Tier 0 for untranslated instructions or failed checks with precise exceptions;
+- managing lock-free table lookups, batched forwarding-stub retirement, content-based and `ic ivau` invalidation, the 32 MB global template arena, instance/thread pooling with stale reuse and lazy revival, code-group sharing (`DbtSpace`/`Dbt`), and periodic unmapping of writable code pages.
 
-Root: `core/engine/src/c/dbt.c`, `core/engine/src/c/dbt_internal.h`,
-`core/engine/src/c/dbt_translate.c`, `core/engine/src/c/dbt_group.c`,
-`core/engine/src/c/dbt_loop.c`, `core/engine/src/c/dbt_routines.c`,
-`core/engine/src/c/dbt_cache.c`, `core/engine/src/c/emit.h`, the Tier 1 section of
-`core/engine/include/appine/engine.h`, the `Tier 1` section of `core/engine/src/lib.rs`
-(`DbtStats`, `DbtRegs`, `DbtMemop`, `DbtSource`, `DbtSpace`, `Dbt`, `trim_dbt_pool`,
-`unmap_written_code`, `written_code_bytes`), `core/engine/tests/dbt.rs`, and
-`core/engine/tests/dbt_loop.rs`.
+Root: `core/engine/src/c/dbt.c`, `dbt_internal.h`, `dbt_translate.c`, `dbt_group.c`, `dbt_loop.c`, `dbt_routines.c`, `dbt_cache.c`, `emit.h`, the Tier 1 section of `core/engine/include/appine/engine.h`, the `Tier 1` section of `core/engine/src/lib.rs` (`DbtStats`, `DbtRegs`, `DbtMemop`, `MEMOP_*`, `DbtSource`, `DbtSpace`, `Dbt`, `trim_dbt_pool`, `unmap_written_code`, `written_code_bytes`), `core/engine/tests/dbt.rs`, and `core/engine/tests/dbt_loop.rs`.
 
-Outside the module: the Tier 0 interpreter and whitelist semantic reference, CPU state layout,
-native stubs, CPU features, the host fault guard and `tests/lockstep` (`engine`); the radix page
-table, TLB/STLB layout and code-group policy (`kernel/mmu`); tier selection and the guest run loop
-(`kernel/process`); libc memop discovery, `APPINE_DBT_REGS` parsing and Go build-ID detection
-(`kernel/exec`); periodic `unmap_written_code`, `written_code_bytes` accounting and `trim_dbt_pool`
-triggers (`kernel/oom`).
+Outside the module: Tier 0 interpreter/whitelist, CPU state, native stubs, CPU features, fault guard and `tests/lockstep` (`engine`); radix page table, TLB/STLB layout and code-group policy (`kernel/mmu`); tier selection and run loop (`kernel/process`); memop discovery, `APPINE_DBT_REGS` and Go build-ID detection (`kernel/exec`); periodic `unmap_written_code`, `written_code_bytes` RSS subtraction and `trim_dbt_pool` pressure triggers (`kernel/oom`).
 
 ## Key types
 
-- `DbtSpace` (`struct appine_dbt`, `Arc`-wrapped, `Send + Sync`) — one translation instance shared
-  by every thread of an address space and every member of a code group: 128 MB W^X code cache
-  with shared routines at its base, dirty-page `struct written` bitmap, lock-free translation
-  table, block log (`struct block`), saved guest words, per-page block buckets and parked counts,
-  `cross_page_blocks`, stale-reuse `sources`/`trusted`/`parkable` lists (up to 64 each), immutable
-  sorted `shared_ranges` and `memop_table` (with `older` chains), ungroup `strikes[64]` ring
-  (`strikes_next`) and `nogroup[64]` ring, register set, lock/flush/generation/`retire_gen`/
-  poisoned state, and `pool.all` links.
-- `Dbt` (`struct appine_dbt_thread`, `Send`) — one thread's attachment: `Arc<DbtSpace>`, code-group
-  tag, atomic active `cpu` and `sole_tag`, 4096-entry direct-mapped jump cache (`jc`), 1 KB-aligned
-  64-entry shadow return stack (`rs`), pending conditional-relink queue (`pending_relinks[29]`,
-  `pending_retire_gen`), statistics (`DbtStats`), and lock-free translation workspace (`xlate`,
-  `scratch`, `probe` CPU, 4096-entry `defined` cache, `prep`).
-- `struct block` (32 bytes) — guest `pc`, entry `code` (NULL when dead), page-bucket chain index,
-  `words` offset, 11-bit `nguest`, 1-bit `parked`, 16-bit `tag`, and saved `first` word for revival.
-- `struct table` / `struct slot` — open-addressed hash table (`2^12..2^19` slots) keyed by
-  `pc | (tag << 48)` and hashed on `pc` only; retired entries become tombstones (`JC_EMPTY = 1`).
-- `DbtRegs` / `struct regs` — host register assignment fixed per instance: `Default` (`CTX=x28`,
-  `T0..T2=x16/x17/x27`, `SP_HOST=x26`; stolen `x16–x18, x26–x28`) or `Go` (`CTX=x25`,
-  `T0..T2=x21/x22/x23`, `SP_HOST=x24`; stolen `x18, x21–x25`).
-- `DbtMemop` (`struct appine_dbt_memop`) — registered libc memop `(pc, kind)` (`memcpy`, `memset`,
-  `memmove`, `memcmp`, `memchr`, `strncmp`, `strlen`, `strcmp`; up to `APPINE_DBT_MEMOPS` = 32).
-- `DbtSource` — trusted code range: `start`, `len` and 5-word identity (`dev`, `ino`, `off`,
-  `ctime`, `size`; all-ones for the vDSO).
-- `struct template` / static `templates` — process-global 32 MB anonymous bump arena with 65,536
-  buckets across 64 shard locks plus `arena_lock`, sharing translated blocks across instances.
-- Static `pool` — up to 16 pooled `appine_dbt` instances (64 MB kept-code budget), up to 8 spare
-  `appine_dbt_thread`s, and the `pool.all` list of all live and pooled instances.
+- `DbtSpace` (`struct appine_dbt`, `Arc`-wrapped, `Send + Sync`) — shared translation instance per address space or code group: 128 MB W^X code cache (`CODE_CACHE_BYTES`) with base routines (`routine_words`), `struct written` dirty-page bitmap (`NULL` for RWX), lock-free `table`, `table_used`/`blocks` (`TABLE_LIMIT = 393,216`), saved guest `words` (`WORDS_LIMIT = TABLE_LIMIT * 64`, 96 MiB), `2^14` `page_head`/`page_parked` buckets, `cross_page_blocks`, stale-reuse `sources`/`trusted`/`parkable` (`APPINE_DBT_SOURCES = 64` each), immutable sorted `shared` (`struct shared_ranges`) and `memops` (`struct memop_table`) with `older` chains, `strikes[64]` (`strikes_next`) and `nogroup[64]`, register set `r`, `lock`/`flushed`/`flushing`/`flush_wanted`/`generation`/`retire_gen`/`poisoned`/`next_tag`, and `pool.all` links.
+- `Dbt` (`struct appine_dbt_thread`, `Send`) — per-thread attachment: `Arc<DbtSpace>`, `tag`, atomic `cpu`/`sole_tag`, `parked`, `generation`, 4096-entry direct-mapped jump cache (`jc`), 1 KB-aligned 64-entry shadow return stack (`rs`, `RS_SHIFT = 10`), `pending_relinks[29]` + `pending_retire_gen`, `DbtStats`, and lock-free workspace (`xlate`, 4096-word `scratch`, `probe` CPU with `mmu == NULL`, 4096-entry `defined` cache, `prep`).
+- `struct block` (32 B) — `pc`, entry `code` (`NULL` when dead), bucket-chain `next` (index + 1), `words` offset, 11-bit `nguest`, 1-bit `parked`, 16-bit `tag`, saved `first` word (`code[ENTRY_CHECK_WORDS]`).
+- `struct table` / `struct slot` — open-addressed hash table (`2^12..2^19` slots) keyed by `pc | (tag << 48)`, golden-ratio hashed on `pc` only; tombstones use `JC_EMPTY = 1`.
+- `DbtRegs` / `struct regs` — per-instance host register set: `Default` (`CTX=x28`, `T0..T2=x16/x17/x27`, `SP_HOST=x26`; stolen `x16–x18, x26–x28`) or `Go` (`CTX=x25`, `T0..T2=x21/x22/x23`, `SP_HOST=x24`; stolen `x18, x21–x25`).
+- `DbtMemop` (`struct appine_dbt_memop`) — `(pc, kind)` for `memcpy`, `memset`, `memmove`, `memcmp`, `memchr`, `strncmp`, `strlen`, `strcmp` (`MEMOP_*`, max `APPINE_DBT_MEMOPS = 32`).
+- `DbtSource` (`struct appine_dbt_source`) — `start`, `len`, 5-word `id` (`dev`, `ino`, `off`, `ctime`, `size`; all-ones for unmodified vDSO).
+- `struct template` / static `templates` — 32 MB global anonymous bump arena, `65,536` buckets (`2^16`), 64 cache-line-padded shard locks + `arena_lock`, `used`/`high` watermarks, `full` flag, max `TEMPLATES_PER_PC = 4` versions/`pc`.
+- Static `pool` — up to `POOL_SIZE = 16` pooled instances (`POOL_KEEP_WORDS` = 64 MB kept code), up to `THREAD_POOL_SIZE = 8` spare threads, and `pool.all`.
 
 ## Public entry points
 
-- **Instances and threads**: `DbtSpace::new(key, regs)`, `set_sources`, `set_memops`, `trust`,
-  `retire_outside`, `share`, `new_tag`; `Dbt::new`, `with_regs`, `attach(space, tag)`, `run(cpu)`,
-  `flush`, `invalidate(cpu, start, len)`, `stats`.
-- **Process-wide memory management**: `trim_dbt_pool`, `unmap_written_code`, `written_code_bytes`.
-- Non-aarch64-Linux builds compile stub entry points (`appine_dbt_run` delegates to
-  `appine_cpu_run`).
+- `DbtSpace`: `SOURCES`, `new(key, regs)`, `set_sources`, `set_memops`, `trust`, `retire_outside`, `share`, `new_tag`.
+- `Dbt`: `new`, `with_regs`, `attach(space, tag)`, `run(cpu)`, `flush`, `invalidate(cpu, start, len)`, `space`, `stats`.
+- Process-wide: `trim_dbt_pool`, `unmap_written_code`, `written_code_bytes`; `MEMOP_*` constants.
+- Non-aarch64-Linux builds compile no-op/NULL stubs (`appine_dbt_run` delegates to `appine_cpu_run`).
 
 ## Data flow / lifecycle
 
-### Register convention and FP state
+### Register convention and lazy FP/SIMD state
 
-- Non-stolen guest GPRs live in same-numbered host registers; stolen registers live in `cpu->x[]`
-  and are loaded into `{T0, T1, T2}` and written back around rewritten instructions (skipping the
-  load for write-only stolen `Rd`, loading `Rd` only for `MOVK`/`BFM`, read-modify-write SIMD GPRs,
-  or when aliased as a source operand; instructions with >3 distinct stolen GPRs fall back to Tier 0).
-  Host `x18` (Android shadow call stack) is never touched. Guest SP lives in `SP_HOST` (`x26`/`x24`),
-  so SP-based operands rename directly.
-- Guest NZCV lives in host NZCV; all DBT-emitted helper code is strictly NZCV-free (`emit.h` omits
-  flag-setting integer ALU encodings).
-- `d->enter(cpu, code)` saves host `x19–x30` (and `d8–d15`/host FPCR only lazily on first FP/SIMD
-  use), clears `cpu->dbt_fp_loaded` on entry, loads NZCV, non-stolen GPRs and `SP_HOST`, and jumps
-  to `code`. Blocks whose scan (`scan_block_uses_fp`, plus page-1 rescan for cross-page fast loops)
-  finds any FP/SIMD or `FPSR` instruction emit a 2-word `dbt_fp_loaded` check at
-  `code[ENTRY_CHECK_WORDS]` (after any integer memop gate, before fast loops or guest code) that
-  calls shared `d->load_fp` to save host `d8–d15`/FPCR, load guest FPCR and FPSR (skipping `msr`
-  when unchanged via `emit_msr_if_changed`) and `V0–V31`, and set `dbt_fp_loaded = 1`.
-  `d->exit` saves `T0/T1/T2` (`pc`, `dbt_site`), NZCV, non-stolen GPRs and `SP_HOST`, and saves
-  `V0–V31`/host FPSR and restores host `d8–d15`/FPCR only when `dbt_fp_loaded != 0` (clearing it;
-  `guard.c` also clears `dbt_fp_loaded` on host-fault recovery). `appine_dbt_run` syncs host
-  `PSTATE.DIT` via `appine_sync_dit` on entry, before Tier 0 steps, and on exit.
+- Non-stolen guest GPRs live in same-numbered host regs; stolen GPRs live in `cpu->x[]`, loaded into `{T0, T1, T2}` and written back around rewritten ops. `emit_operands` and `emit_fast_operands` skip `emit_load_guest` for write-only stolen `Rd` (loading `Rd` only when `reads_rd` is set — `MOVK`, `BFM`, or RMW SIMD GPRs via `simd_dp_operands` — or when aliased as a source; `nmap == 3` clears `x->t2_group = -1`; >3 distinct stolen GPRs fall back to Tier 0). Host `x18` (Android shadow call stack) is untouched; guest SP lives in `SP_HOST` (`x26`/`x24`).
+- Guest NZCV lives in host NZCV; all DBT helper code is strictly NZCV-free (`emit.h` omits flag-setting ALU encodings).
+- `d->enter(cpu, code)` allocates a 176 B frame (`FRAME_BYTES`), saves host `x19–x30` (reserving `+104` for FPCR and `+112` for `d8–d15`), zeroes `cpu->dbt_fp_loaded`, loads NZCV, non-stolen GPRs and `SP_HOST`, and jumps to `code`.
+- Blocks whose page-0 scan (`scan_block_uses_fp`, stopping at `B`/`BL`/`BR`/`BLR`/`RET`/`SVC`/`BRK`; plus page-1 rescan for cross-page fast loops, retrying `prepare` once with `force_fp = true`) sees any SIMD/FP DP, SIMD/FP load/store, or `MRS`/`MSR FPSR` emit a 2-word `dbt_fp_loaded` check (after any integer memop gate, before fast loops or guest code) branching to `STUB_LOAD_FP` -> `d->load_fp`. `d->load_fp` saves host `d8–d15`/FPCR, loads guest FPCR/FPSR (skipping unchanged `msr` via `emit_msr_if_changed`) and `V0–V31`, sets `dbt_fp_loaded = 1`, and resumes.
+- `d->exit` saves `T0/T1/T2` (`pc`, `dbt_site`), NZCV, non-stolen GPRs and `SP_HOST`; only if `dbt_fp_loaded != 0` does it clear `dbt_fp_loaded`, save `V0–V31`/host FPSR, restore host FPCR via `emit_msr_if_changed` against `cpu->fpcr`, and restore `d8–d15` (`guard.c` also clears `dbt_fp_loaded` on fault recovery). `appine_dbt_run` syncs `PSTATE.DIT` via `appine_sync_dit` on entry, before Tier 0 steps, and on exit.
 
-### Blocks and instruction handling
+### Block translation, guards and instruction lowering
 
-- Every block begins with a 2-word entry kick check (`ENTRY_CHECK_WORDS = 2`), holds up to 256
-  guest instructions (`MAX_BLOCK_INSNS`), and stops before exceeding 4096 host words
-  (`MAX_BLOCK_WORDS`), 256 stubs, 512 fixups, 516 relocations, or the 4 KiB guest page boundary
-  (ending with an inline `R_CHAIN_FWD` stub; only matched cross-page fast loops additionally cover
-  words in the immediately following executable page, tracked in `block::nguest`). Guest words are
-  snapshotted lazily (32 words initially, extended in 64-word chunks). Terminators are `B`, `BL`,
-  `BR`, `BLR`, `RET`, `SVC #0` and `R_INTERP` fallbacks; conditional branches, `DSB`/`ISB` and
-  `MSR FPCR` emit deferred side-exit stubs and continue on fall-through.
-- Whitelist parity with Tier 0: SIMD/FP data processing (`bits 28:25 & 7 == 7`) checks
-  `appine_has(FP|ASIMD) && appine_native_available() && appine_simd_dp_decode` directly;
-  `dbt_tier0_defined` fast-paths unconditionally-defined base ARMv8.0 encodings
-  (`dbt_tier0_base_defined`) before probing `appine_interp_exec` on a per-thread probe CPU
-  with `mmu == NULL` (cached in a 4096-entry direct-mapped cache). Rejected instructions emit
-  `R_INTERP`.
-- Lowering:
-  - integer ALU, FlagM (`CFINV`/`XAFLAG`/`AXFLAG`/`RMIF`/`SETF8`/`SETF16`), FP/NEON DP and
-    barriers copy verbatim (renaming stolen/SP operands); `DSB` and `ISB` check `cpu->ivau_page`
-    and side-exit `R_CODE` at `pc + 4` when non-zero;
-  - `ADR`/`ADRP` emit `emit_mov_const`; block-local `konst` tracks `ADR`/`ADRP` plus flagless
-    `ADD Xd, Xn, #imm{, lsl #12}` for constant-slot TLB checks; `affine` tracks depth-1 affine
-    relations for grouping;
-  - loads/stores take the inline TLB or grouped path; `PRFM`/`PRFUM` emit nothing;
+- Blocks begin with a 2-word kick check (`ENTRY_CHECK_WORDS = 2`: `ldr T0, [CTX, #pending]` + `cbnz -> R_KICK`), hold `<= 256` guest insns (`MAX_BLOCK_INSNS`), and stop before exceeding `4096` host words (`MAX_BLOCK_WORDS`), `256` stubs, `512` fixups, `516` relocs (`260` links), or the 4 KiB page boundary (emitting an inline `R_CHAIN_FWD` stub; only matched cross-page fast loops cover page-1 words in `block::nguest`). Guest words snapshot lazily (32 words initially, +64-word chunks via `fetch_guest`). Terminators: `B`, `BL`, `BR`, `BLR`, `RET`, `SVC #0`, `R_INTERP`; conditional branches, `DSB`/`ISB` and `MSR FPCR` emit deferred side-exit stubs and continue.
+- Whitelist parity: SIMD/FP DP (`bits 28:25 & 7 == 7`) checks `appine_has(FP|ASIMD) && appine_native_available() && appine_simd_dp_decode` directly; `dbt_tier0_defined` fast-paths base ARMv8.0 encodings (`dbt_tier0_base_defined`) before probing `appine_interp_exec` on `t->probe` (`mmu == NULL`), cached in a 4096-entry direct-mapped cache. Rejected encodings emit `R_INTERP`.
+- Lowering (`dbt_translate.c`):
+  - integer DP, FlagM/FlagM2 (`CFINV`/`XAFLAG`/`AXFLAG`/`RMIF`/`SETF8`/`SETF16`), SIMD/FP DP and barriers copy verbatim (renaming stolen/SP); `DSB`/`ISB` check `cpu->ivau_page` and side-exit `R_CODE` at `pc + 4` when non-zero;
+  - `ADR`/`ADRP` emit `emit_mov_const`; block-local `konst` tracks `ADR`/`ADRP` and flagless 64-bit `ADD Xd, Xn, #imm{, lsl #12}` (`rd, rn < 31`) for constant-slot TLB checks; `affine` tracks depth-1 relations (`ADD`/`SUB` imm incl. SP, `MOV`, immediate `M_PRE`/`M_POST` writebacks) for grouping;
+  - loads/stores use inline TLB or grouped checks; `PRFM`/`PRFUM` emit nothing;
   - `SVC #0` exits `R_SVC` inline at `pc + 4`; non-zero `SVC` and `BRK` go to Tier 0;
-  - `MRS FPCR` and `MRS`/`MSR TPIDR_EL0` access `struct appine_cpu`; `MRS DCZID_EL0`/`CTR_EL0`/
-    `TPIDRRO_EL0`/`ID_AA64*`/`MIDR_EL1`/`MPIDR_EL1`/`REVIDR_EL1` materialize feature/constant
-    values inline; `NZCV` (R/W), `FPSR` (R, plus masked `MSR FPSR` skipping `msr` when unchanged),
-    `DIT` (R/W immediate and register, updating `cpu->dit` and host `PSTATE.DIT`), and
-    `CNTVCT`/`CNTVCTSS`/`CNTFRQ` (R) execute natively; `MSR FPCR` stays inline when
-    `(val & fpcr_write_mask()) == cpu->fpcr` and exits `R_INTERP` otherwise; other system
-    registers go to Tier 0;
-  - `HINT` space (NOP, PAC/BTI hints) emits nothing except `YIELD` (`0xd503203f`), copied verbatim;
-    non-hint PAC is undefined in Tier 0;
-  - `DC CVAC`/`CVAU`/`CIVAC`/`CVAP`/`CVADP` and `IC IVAU` do 1-byte read TLB checks; `IC IVAU`
-    untags and records `cpu->ivau_page` (page 0 or a second differing page exits `R_INTERP`);
-    `DC ZVA` zeroes 64 aligned bytes via four `STP XZR, XZR` after a write TLB check; `CLREX`
-    clears `cpu->excl_size`;
-  - exclusives and atomics: untag TBI top byte, check SP alignment and natural alignment (`R_INTERP`
-    on misalignment), and do an `in_granule` TLB check. `LDXR`/`LDAXR` and 8/16-byte
-    `LDXP`/`LDAXP` load and record `excl_addr`/`excl_value`(+`excl_value2`)/`excl_size`;
-    `STXR`/`STLXR` and 8/16-byte `STXP`/`STLXP` verify the monitor and run an inline
-    `ldaxr`/`stlxr` (or `ldaxp`/`stlxp`) CAS loop (borrowing unused `x0..x2` saved in `cpu->x[]`
-    when operands are stolen); `LDAR`/`STLR`, `LDAPR`, `LDAPUR*`/`STLUR*`, `CAS`, `CASP` (when
-    `size < 2` and data pairs `rs`/`rs + 1`/`rt`/`rt + 1` are non-stolen; a stolen base `rn` is
-    handled inline) and LSE `LD<op>`/`SWP` run natively on `[T2]`; `CASP` with stolen data-pair
-    registers goes to Tier 0.
+  - `MRS`/`MSR`: `FPCR` (R from `cpu->fpcr`; W inline if `(val & fpcr_write_mask()) == cpu->fpcr`, else side-exits `R_INTERP`), `TPIDR_EL0` (R/W `cpu->tpidr_el0`), `CTR_EL0` (`0x8444c004`, `DIC=IDC=0`), `DCZID_EL0` (`4`), `TPIDRRO_EL0` (`0`), and under `CPUID` any `appine_id_register` materialize inline; `NZCV` (R/W), `FPSR` (R verbatim; W masks `0x0800009f`, skipping unchanged `msr`), `DIT` (R verbatim; W imm/reg update `cpu->dit` and host `PSTATE.DIT`), and `CNTVCT`/`CNTVCTSS`/`CNTFRQ` (R) run natively; other sysregs go to Tier 0;
+  - `HINT` space (NOP, PAC/BTI hints) emits nothing except verbatim `YIELD` (`0xd503203f`); non-hint PAC is undefined in Tier 0;
+  - `DC CVAC`/`CVAU`/`CIVAC`/`CVAP`/`CVADP` and `IC IVAU` run 1 B `in_granule` read TLB checks; `IC IVAU` untags and sets `cpu->ivau_page` (page 0 or differing second page exits `R_INTERP`); `DC ZVA` aligns down to 64 B, runs a 64 B write TLB check, and zeroes via four `STP XZR, XZR`; `CLREX` zeroes `cpu->excl_size`;
+  - exclusives/atomics: untag TBI top byte, check 16 B SP and natural alignment (`R_INTERP` on misalignment), and run an `in_granule` TLB check. `LDXR`/`LDAXR` and 8/16 B `LDXP`/`LDAXP` record `excl_addr`/`excl_value`(+`excl_value2`)/`excl_size` (16 B pair uses `ldaxp` + `clrex`); `STXR`/`STLXR` and 8/16 B `STXP`/`STLXP` verify the monitor and run an inline `ldaxr`/`stlxr` (or `ldaxp`/`stlxp`) CAS loop borrowing 0–4 unused `x0..x15` regs saved in `cpu->x[]` (0–1 for `STXR`/`STLXR`, 1 for 8 B `STXP`/`STLXP`, 2–4 for 16 B `STXP`/`STLXP`); `LDAR`/`STLR`, `LDAPR`, `LDAPUR*`/`STLUR*`, `CAS`, `CASP` (`size < 2`, non-stolen `rs`/`rs+1`/`rt`/`rt+1`; stolen `rn` inline), and LSE `LD<op>`/`SWP` run natively on `[T2]`; `CASP` with stolen data pairs goes to Tier 0.
 
-### Memory access and grouped checks
+### Inline soft-TLB, 2 MiB refill and grouped checks
 
-- Inline accesses cover integer LDR/STR (immediate, pre/post-index, register-offset, literal),
-  LDP/STP/LDNP/STNP/LDPSW, SIMD single/pair/literal, and `LD1–LD4`/`ST1–ST4` (multiple, single
-  lane, replicate, post-index).
-- Hit path indexes `cpu->tlb[4096]` by the **last byte's** 12-bit page number and compares the
-  stored tag (`~vpn`, 0 = invalid) via `EON` against the **first byte's** page number (`T0 >> 12`),
-  rejecting misses, TBI top-byte mismatches and cross-page accesses in one `CBNZ`. Single-register
-  ops access `[T2, T0]` directly; pairs and structures add `T0` into `T2` first. Variants:
-  parallel last-byte calculation for `|imm + bytes - 1| < 4096`; `in_granule` skipping the last-byte
-  add for 1-byte accesses, aligned 16-byte SP accesses and atomics; constant TLB slot offset for
-  `M_LITERAL` and `konst`-tracked single-page accesses. SP 16-byte alignment is checked once per
-  block (`x->sp_aligned`) and cleared only when SP moves by a non-multiple of 16.
-- Refill stubs (5 words, never merged) carry `info` (`bytes - 1`, `fail` reason `R_INTERP` or
-  `R_UNGROUP`, resume delta) and guest `pc` to shared routines `d->refill[0]` (read) and
-  `d->refill[1]` (write). The routine saves host `x0–x5` into `cpu->x[0..5]`, fails on
-  `cpu->nwatch != 0` or non-zero bits `55:48` at either endpoint, and calls `emit_fill`, which first
-  probes 2 MiB `cpu->stlb` (`tag_write` on write refills; `tag_read` on read refills, deriving
-  `w_mask` strictly from `tag_write == ~svpn` via `EON`/`CLZ`/`SBFX`) to skip the page-table walk
-  on warm superpages. On an STLB miss (or a write refill against a read-only STLB entry), it walks
-  the 4-level radix page table via plain address-dependent loads. Write refills require
-  `PROT_READ | PROT_WRITE` (serving atomics and grouped reads). Both an STLB hit and an L2
-  `PTE_SUPER` leaf (which also populates `cpu->stlb` and `stlb_used`) feed the same superpage 4 KiB
-  TLB fill path, which—if preceding 4 KiB slot `(vpn - 1)` holds a matching tag and
-  addend—batch-prefills up to 8 contiguous 4 KiB slots within the same 64-entry `tlb_used` word.
-  Cross-page accesses probe/fill both ends and succeed only when both have equal addends
-  (contiguous host memory). Failures exit cleanly to `d->exit` before modifying guest state.
-- Grouped checks (`dbt_group.c`): up to 8 concurrent active groups (`cpu->dbt_groups[8]`, tracked
-  by `active_groups` and 256-bit `grouped_bits`), each covering at most `GROUP_SPAN` = 2048 bytes
-  and 32 members (at least 2), with offsets inside `±8 MiB`; out-of-span accesses on the same base
-  are skipped without terminating active groups. Non-`M_REG` groups track block-local affine
-  aliases (`ADD`/`SUB` imm, `MOV`, pre/post writebacks); SP members join only an SP-led group while
-  SP stays 16-byte aligned. `M_REG` groups match `(rn, rm, option, shift)` and track constant `rn`
-  updates and 64-bit `LSL`/`SXTX` `rm` updates. Allowed intervening ops are ALU, `ADR`/`ADRP`,
-  SIMD DP, conditional branches, hints, barriers/`CLREX`, prefetches, non-clobbering
-  `MRS TPIDR_EL0` / `LDAR` / `STLR` / `LDAPR`, and other non-atomic memory ops (spilling/reloading
-  `T2` via `dbt_groups[slot]` when clobbered). Stolen bases compute into `T0` and recover
-  `host(base)` into `T2`. Leader refill failures exit `R_UNGROUP`: unless `c->nwatch != 0`,
-  `dbt_ungroup` searches the 64-entry `strikes[64]` ring linearly on the cold slow path, recording
-  a first miss in the first empty slot (or overwriting FIFO via `strikes_next`) so alternating
-  leaders cannot collide, and on the second miss clears the slot, appends `pc` to the 64-entry FIFO
-  `nogroup` ring (disabling grouping for 256 bytes, versioned into template keys via
-  `dbt_nogroup_key`), and retires blocks covering `pc` in its page bucket.
+- Inline accesses cover integer `LDR`/`STR` (imm, pre/post-index, register-offset, literal), `LDP`/`STP`/`LDNP`/`STNP`/`LDPSW`, SIMD single/pair/literal, and `LD1–LD4`/`ST1–ST4` (multiple, single lane, replicate, post-index).
+- Hit path indexes `cpu->tlb[4096]` by the **last byte's** 12-bit page number and `EON`-compares the stored tag (`~vpn`, 0 = invalid) against the **first byte's** page (`T0 >> 12`), rejecting misses, TBI mismatches and page crossings in one `CBNZ`. Single-reg ops use `[T2, T0]`; pairs/structures add `T0` into `T2`. Fast variants: parallel last-byte address (`dbt_emit_address_imm`) when `|imm + bytes - 1| < 4096`; `in_granule` for 1 B, aligned 16 B SP and atomics; constant TLB offset (`dbt_emit_tlb_check_known`) for single-page `M_LITERAL` and `konst` accesses. SP 16 B alignment is checked once per block (`x->sp_aligned`) and cleared only on non-16 B SP moves.
+- Refill stubs (5 words, unmerged) pass `info` (`bytes - 1`, `fail` reason `R_INTERP`/`R_UNGROUP`, signed resume delta) and guest `pc` to `d->refill[0]` (read) / `d->refill[1]` (write). The routine saves `x0–x5` into `cpu->x[0..5]`, fails on `nwatch != 0` or non-zero bits `55:48` at either endpoint, and calls `emit_fill`: probes 2 MiB `cpu->stlb` first (`tag_write` on writes; `tag_read` on reads, deriving `w_mask` strictly from `tag_write == ~svpn` via `EON`/`CLZ`/`SBFX`), falling back on miss (or write against RO STLB) to a 4-level radix walk using plain address-dependent loads. Write refills require `PROT_READ | PROT_WRITE` (serving atomics and grouped reads). Both STLB hits and L2 `PTE_SUPER` leaves (filling `stlb`/`stlb_used`) enter the superpage 4 KiB TLB fill path: if slot `(vpn - 1)` holds matching tag and addend, it batch-prefills up to 8 contiguous 4 KiB slots within one 64-entry `tlb_used` word. Cross-page accesses probe/fill both ends and succeed only on equal addends (contiguous host memory). Failures exit cleanly to `d->exit` before mutating guest state.
+- Grouped checks (`dbt_group.c`): up to `8` concurrent groups (`cpu->dbt_groups[8]`, `active_groups`, 256-bit `grouped_bits`), each covering `<= 2048 B` (`GROUP_SPAN`) and `2..32` members (`GROUP_MAX`) within `±8 MiB`; out-of-span accesses on the same base skip without killing active groups. Non-`M_REG` groups track block-local affine aliases (`ADD`/`SUB` imm, `MOV`, imm writebacks); SP joins only SP-led groups while 16 B-aligned. `M_REG` groups match `(rn, rm, option, shift)` and track constant `rn` and 64-bit `LSL`/`SXTX` `rm` updates. Allowed intervening ops: ALU, `ADR`/`ADRP`, SIMD DP, conditional branches, hints, barriers/`CLREX`, prefetches, non-clobbering `MRS TPIDR_EL0`, `LDAR`/`STLR`/feature-gated `LDAPR`, and non-atomic memory ops (spilling/reloading `T2` via `dbt_groups[slot]`). Stolen bases compute into `T0` and recover `host(base)` into `T2`. Non-encodable offsets borrow `T0` (or `T1` if integer pair `rt` is stolen; pairs with both `rt`/`rt2` stolen are rejected). Leader refill failures exit `R_UNGROUP`: if `nwatch == 0`, `dbt_ungroup` linearly scans `strikes[64]` (first miss fills first vacant slot or FIFO via `strikes_next`; second clears the slot, appends `pc` to FIFO `nogroup[64]` disabling grouping for `256 B` and versioning templates via `dbt_nogroup_key`, and retires covering blocks in `pc`'s page bucket).
 
 ### Strip-mined native fast loops
 
-- For non-memop blocks whose prefix `0..back_idx` forms a self-loop within one page or crossing at
-  most one 4 KiB code page boundary (next page executable and matching shared-group status; slow
-  fallback stays single-page), `dbt_try_fast_loop` recognizes `FL_COUNTDOWN` (`SUB`/`SUBS` `#1..4096`
-  + `CBNZ`/`B.NE`/`PL`/`HI`/`GE`/`GT`/`TBZ`/`TBNZ #63/#31`), `FL_COUNTUP_ZERO` (`ADD`/`ADDS` +
-  `CBNZ`/`B.NE`/`MI`/`LT`/`TBZ`/`TBNZ`), `FL_CMP_INC` and `FL_CMP_DEC` (`CMP` reg/imm +
-  `B.NE`/`LT`/`LE`/`GT`/`GE`/`LO`/`LS`/`HI`/`HS`, including 64-bit `ADD`/`SUB` + 32-bit compare and
-  64-bit affine-derived compare `d = c + cmp_off`), and header-tested `while` loops closed by
-  unconditional `B loop`, allowing up to 4 early-exit conditional side branches
-  (`B.cond`/`CBZ`/`CBNZ`/`TBZ`/`TBNZ`, enforcing identical root/alias shifted-ness across exits),
-  `ADR`/`ADRP`, and single-page read-only `M_LITERAL` loads, while rejecting calls, syscalls,
-  barriers, hints, atomics, FlagM, SP DP, read-before-write NZCV, or >2 distinct stolen GPRs per
-  instruction.
-- Supports up to 7 pointer-opaque root bases (including zero-stride `M_OFFSET` SP bases and live
-  end-of-iteration affine aliases not read before write) and up to 16 coalesced streams (positive
-  and negative constant strides, offset/pre/post-index, shifted-`ADD` derived pointers (`fl_pidx`)
-  feeding `LDP`/`STP`/`LD1–LD4`/`ST1–ST4`/`LDUR`, `M_REG` with loop-invariant, 64-bit or 32-bit
-  `UXTW`/`SXTW` monotonic induction, derived shifted-sum `(r0 + r1 + off) << 0..4`, or
-  intra-iteration bit-width-bounded table-lookup `u_bits` indices with `(1 << u_bits) << shift <= 4096`,
-  and post-access register strides `ADD Xd, Xd, Xm`, requiring at least one non-zero-stride stream
-  and total estimated size `<= 1600` host words).
-- The strictly NZCV-free prologue checks `nwatch == 0` (and 16-byte SP alignment when SP is used),
-  computes remaining back-edges clamped to `KICK_BUDGET` (`32..4096` iterations, strictly capped at
-  12,288 guest instructions), clamps 32-bit `M_REG` induction indices against unsigned/signed
-  32-bit wrap, stores `safe_iters` in `dbt_groups[7]`, validates zero-stride/LUT streams with a
-  dual-endpoint 4 KiB TLB contiguity check and single-page `M_LITERAL`s with a 4 KiB read TLB
-  check, and probes positive/negative-stride streams in 2 MiB `stlb` then 4 KiB `tlb` (checking
-  both iter-0 upper page span and downward `avail = page_off` runway for negative strides, storing
-  root addends in `dbt_groups[0..6]`, using `MUL` then `UDIV` for register strides `< 2 MiB`, and
-  shifts or exact 34-bit reciprocal multiplication for constant strides). Any miss, `safe_iters < 2`,
-  or stride failure bails to the checked loop.
-- On entry it adds addends to roots, pins all touched stolen GPRs (plus `M_LITERAL` host bases, up
-  to 6: first 2 in `T0`/`T1`, extra borrowing unused non-stolen host registers saved in their dead
-  `cpu->x[]` slots; or falls back to per-instruction `T0`/`T1` loads skipping write-only `Rd`), runs
-  `safe_iters` iterations counted in `T2` (omitting the loop-closing `CMP` only when no side exit or
-  NZCV reader depends on it), flushes written pinned registers, restores borrowed registers,
-  subtracts addends from roots and live aliases (`emit_fast_epilogue`, shared with early side exits
-  via a direct `R_CHAIN`/`R_CHAIN_FWD` stub for 1 target or `adr T2` trampolines + `br T2` for
-  multiple targets), re-emits any omitted bottom-tested compare once for exact NZCV, and falls
-  through to the standard checked loop for at least one final/boundary iteration. Matched blocks
-  increment `DbtStats::fast_loops` (preserved in templates).
+- For non-memop blocks whose prefix `0..back_idx` is a self-loop within one page or crossing at most one 4 KiB page boundary (page 1 exec and, for shared blocks under active `d->shared`, also in `d->shared`; private tagged blocks may cross onto shared pages; checked fallback stays single-page), `dbt_try_fast_loop` (`dbt_loop.c`) matches:
+  - `FL_COUNTDOWN` (`SUB`/`SUBS` `#1..4096` + `CBNZ`/`B.NE`/`PL`/`HI`/`GE`/`GT`/`TBZ #63/#31`, or header `CBZ`/`TBNZ #63/#31` + bottom `B`),
+  - `FL_COUNTUP_ZERO` (`ADD`/`ADDS` `#1..4096` + `CBNZ`/`B.NE`/`MI`/`LT`/`TBNZ #63/#31`, or header `CBZ`/`TBZ #63/#31` + bottom `B`),
+  - `FL_CMP_INC`/`FL_CMP_DEC` (`CMP` reg/imm + `B.NE`/`LT`/`LE`/`GT`/`GE`/`LO`/`LS`/`HI`/`HS`, header- or bottom-tested, incl. 64-bit `ADD`/`SUB` + 32-bit compare and 64-bit affine compare `d = c + cmp_off`).
+- Allows `<= 4` early-exit side branches (`B.cond`/`CBZ`/`CBNZ`/`TBZ`/`TBNZ`, identical root/alias shifted-ness and strictly external targets), `ADR`/`ADRP`, exact `NOP`, and `<= 4` single-page `M_LITERAL`s; rejects calls, syscalls, barriers, non-NOP hints, atomics, FlagM, SP DP, read-before-write NZCV, or >2 stolen GPRs/insn.
+- Supports `<= 7` pointer-opaque roots (`nptrs + nlits <= 7`, incl. zero-stride `M_OFFSET` SP bases and live end-of-iteration affine aliases not read before write) and `<= 16` coalesced streams: positive/negative constant strides (`|stride| <= 4095`), offset/pre/post-index, shifted-`ADD` derived pointers (`fl_pidx`), `M_REG` (invariant, 64-bit or 32-bit `UXTW`/`SXTW` monotonic induction, derived shifted-sum `(r0 + r1 + off) << 0..4`, or `u_bits`-bounded LUTs with `(1 << u_bits) << shift <= 4096`), and post-access register strides `ADD Xd, Xd, Xm` (requiring >=1 non-zero-stride stream, `<= 1600` est. host words, `<= 192` bails).
+- The NZCV-free prologue checks `nwatch == 0` (and 16 B SP alignment if SP used), clamps iterations to power-of-2 `KICK_BUDGET` (`32..4096`, `(1 << kick_log2) * (back_idx + 1) <= 12,288` guest insns), stores `safe_iters` in `dbt_groups[7]`, validates zero-stride/LUT streams via dual-endpoint 4 KiB TLB contiguity and `M_LITERAL`s via 4 KiB read TLB, probes strided streams in 2 MiB `stlb` then 4 KiB `tlb` (checking upper span and downward `avail = page_off` for negative strides; addends in `dbt_groups[0..6]`; `MUL` then `UDIV` for register strides `< 2 MiB`; shifts or exact 34-bit reciprocal multiply for constant strides), and clamps 32-bit `UXTW`/`SXTW` `M_REG` indices against unsigned/signed wrap. Any miss, `safe_iters < 2` or stride failure bails to the checked loop.
+- On entry it adds addends to roots, pins `<= 6` touched stolen GPRs and `M_LITERAL` host bases into `T0`/`T1` + `<= 8` borrowed unused non-stolen regs saved in dead `cpu->x[]` slots (falling back to per-insn `T0`/`T1` loads if no `M_LITERAL`s), runs `safe_iters` iterations counted in `T2` (omitting loop-closing/header `CMP` only when unused by side exits or NZCV readers), flushes written pinned regs, restores borrowed regs, subtracts addends from roots and live aliases (`emit_fast_epilogue`, shared with early exits via direct `R_CHAIN`/`R_CHAIN_FWD` for 1 unique target or `adr T2` trampolines + `dbt_groups[7]` spill + `br T2` for multiple), re-emits any omitted bottom-tested `CMP` once for exact NZCV, and falls through to the checked loop for >=1 final/boundary iteration. Matched blocks increment `DbtStats::fast_loops` (preserved in templates).
 
 ### Control flow
 
-- Direct branches link by patching `b -> b` (CMODX-safe). At install time (`dbt_link_block`),
-  all recorded direct-branch stubs (`x->links`/`p->links`, persisted in templates: deferred
-  side-exit stubs, inline unconditional `B`/`BL`, fallthrough `R_CHAIN_FWD`, `BL`/`BLR` landing
-  pads, and fast-loop side-exit stubs) are linked eagerly when targets already exist in `d->table`
-  (with single-site conditional branches relinked directly before publication); on multithreaded
-  instances (`nthreads > 1`), `pretranslate_cond_targets` pre-translates up to 2 same-page
-  conditional branch targets before installation so conditional branches can still relink directly
-  before publication. Runtime patching enforces matching `generation`, `target != patch_site`, and
-  no shared->private link; `patch_stub` uses CAS against the unlinked `b +4` on `LINK_AT_ENTRY`
-  stubs at `code[ENTRY_CHECK_WORDS]` so concurrent block retirement's forwarding branch is never
-  overwritten. Conditional-branch relinking always runs under `d->lock`, requires matching
-  `retire_gen`, `can_relink_branch`, and `dbt_relink_word` confirming a conditional branch
-  instruction, and finishes full icache sync before unlocking. Because conditional branches are not
-  CMODX-safe on ARM64, shared (`tag == 0`, `LINK_SHARED`) blocks require being the sole attached
-  thread on the entire `DbtSpace` (`d->nthreads == 1`, including threads of other code-group
-  members, which execute the same shared blocks), whereas private tagged blocks (`tag != 0`,
-  `!LINK_SHARED`) are unreachable from other tags and only require being the sole attached thread
-  of `t->tag` (`t->sole_tag`, maintained under `d->lock` at attach/detach). When linking to an
-  already-translated target, the unconditional `b -> b` stub is patched lock-free (lazy cache
-  maintenance, or `dbt_sync_range` if the thread hit an already-patched site), and eligible
-  conditional relinks are queued in `t->pending_relinks` (up to `PENDING_RELINK_CAP` = 29, kept
-  across syscalls) to be drained and synced under `d->lock` with the next block install (or once
-  the batch fills); flush catch-up, `retire_gen` changes, and detach discard queued relinks.
-- Forward direct links skip the 2-word entry kick check (`code + 2`, still executing any memop gate
-  and `dbt_fp_loaded` check); backward/self links and indirect jumps land at `code + 0`, so every
-  loop checks `pending`.
-- Indirect branches (`BR`/`BLR`/`RET`) probe the thread's 4096-entry direct-mapped jump cache
-  (`t->jc`) with the raw target first (tagged targets miss because jump-cache entries store aligned
-  48-bit PCs); misses branch to in-cache `d->lookup`, which applies TBI0 (`emit_untag_pc`:
-  NZCV-free `tbnz #55` + `and` clearing bits 63:56 when bit 55 == 0) before bracketing a lock-free
-  `d->table` probe with odd/even `stlr` increments of `cpu->dbt_lookup_seq` (excluding misaligned,
-  `>= 2^48`, and `pc == 0`), fills `t->jc` and jumps directly on hit, or exits `R_LOOKUP` with the
-  untagged PC.
-- Shadow return stack: `BL`/`BLR` emit a host `BL` over an `R_CHAIN` landing pad and push
-  `(pc + 4, landing_pad)` onto the 1 KB-aligned 64-entry ring `t->rs` (wrapping via `BFXIL`);
-  `RET X30` compares the top against `x30`, pops and executes host `RET T2` on hit, or branches to
-  shared out-of-line `d->ret_miss` (which probes `t->jc` with plain `ubfx` indexing and falls back
-  to `d->lookup`, keeping `RET` epilogues compact). Empty slots (and `memop_ret` misses) point at
-  `d->rs_miss`, which moves `x30` into `T0` and branches to `d->lookup` (applying `emit_untag_pc`
-  there). Out-of-line `exec_memop` returns and `dbt_run` entry likewise apply `untag_pc`.
+- Direct branches patch CMODX-safe `b -> b`. At install, `dbt_link_block` eagerly links recorded stubs (`x->links`/`p->links`, persisted in templates: side exits, inline `B`/`BL`, fallthrough `R_CHAIN_FWD`, `BL`/`BLR` landing pads, fast-loop side exits) targeting existing `d->table` entries, relinking single-site conditional branches directly before publication. When post-publication conditional relinking is disallowed (`!can_relink_branch`), `pretranslate_cond_targets` pre-translates `<= 2` same-page conditional targets before install (bounded by `nhost <= 512`, `nrelocs <= 128`, `nlinks <= 32`, `<= 3/4` cache/table load, `page_parked == 0`). Runtime patching requires matching `generation`, `target != patch_site`, and no shared->private link; `patch_stub` uses CAS against unlinked `b +4` on `LINK_AT_ENTRY` stubs at `code[ENTRY_CHECK_WORDS]` so concurrent retirement's forwarding branch is never overwritten. Conditional relinking always holds `d->lock`, verifies `retire_gen`, `can_relink_branch` (`d->nthreads == 1` for shared/untagged; atomic `t->sole_tag` for private tagged), and `dbt_relink_word`, completing full icache sync before unlocking. Linking to an existing target patches `b -> b` lock-free (`dbt_publish_link` lazy maintenance, or `dbt_sync_range` if the thread hit an already-patched site) and queues eligible conditional relinks in `t->pending_relinks[29]` (kept across syscalls; drained under `d->lock` at next install or when full; cleared on flush catch-up, `retire_gen` change or detach). Forward links skip the 2-word kick check (`code + 2`); backward/self/indirect jumps land at `code + 0`.
+- Indirect branches (`BR`/`BLR`/`RET`) probe `t->jc[4096]` (`emit_jc_probe`, plain `ubfx` index) with raw targets first (tagged targets miss since `t->jc` holds aligned 48-bit PCs); misses enter `d->lookup`, which applies TBI0 (`emit_untag_pc`: NZCV-free `tbnz #55` + `and` clearing bits 63:56 when bit 55 == 0), brackets a lock-free `d->table` probe with odd/even `stlr` increments of `cpu->dbt_lookup_seq` (excluding misaligned, `>= 2^48`, and `pc == 0`), fills `t->jc` and jumps on hit, or exits `R_LOOKUP` with untagged PC.
+- Shadow return stack: `BL`/`BLR` emit host `BL` over an `R_CHAIN_FWD` landing pad and push `(pc + 4, landing_pad)` onto 1 KB-aligned `t->rs[64]` (`BFXIL` wrap); `RET X30` compares top against `x30`, pops and runs host `RET T2` on hit, or jumps to `d->ret_miss` (`emit_jc_probe` -> `d->lookup`). Empty `t->rs` slots point to `d->rs_miss` (`mov T0, x30` -> `d->lookup`); `d->memop_ret` mismatches branch to `d->ret_miss`. `dbt_run` entry and `exec_memop` returns also apply `untag_pc`.
 
 ### Dispatcher and libc memops
 
-- `appine_dbt_run` delegates directly to `appine_cpu_run` when `d->poisoned`, syncs `DIT`,
-  publishes `t->cpu` (`SEQ_CST`), and runs `dbt_run` under `appine_guard_run`. A host fault returns
-  `APPINE_EXIT_HOST_FAULT`, sets `d->poisoned = true`, wakes parked flush waiters and clears the
-  global template arena (`dbt_template_clear(false)`).
-- Each `dbt_run` iteration: join (`park`) or perform (`flush_world`) a pending flush; catch up
-  generation (reset `rs`, drop pending relinks, clear dirty `jc`); on consuming `c->pending`, clear
-  `excl_size` and return `APPINE_EXIT_KICK`. Otherwise, when `patch_site == NULL` (e.g. syscall
-  re-entry), probe thread-local `t->jc` first (skipping `dbt_lookup_seq` and shared `d->table` on
-  hit, and filling/refreshing `t->jc` on miss or stale retired slot) before lock-free
-  `dbt_table_lookup`. On a miss with non-zero `page_parked`, lock and call `dbt_revive`; else
-  lock-free `prepare` + locked `install` (re-verifying guest words and `memop_kind`), or
-  `appine_interp_step` for unfetchable PCs; fill jump cache if requested; call `enter(c, code)` and
-  dispatch the exit:
-  - `R_CHAIN`/`R_CHAIN_FWD`: record patch site/branch delta/shared flag for next lookup;
-  - `R_LOOKUP`: request jump-cache fill on next lookup;
-  - `R_UNGROUP`: call `dbt_ungroup` if `!c->nwatch`, then fall through to Tier 0 (skipping memop);
-  - `R_INTERP`: for exact `R_INTERP` at a registered shared/ungrouped memop PC, try `exec_memop`
-    (on hit, pop matching `dbt_rs` top and set `pc = x30`); else run `appine_interp_step`
-    (absorbing `APPINE_EXIT_CODE` in place via `code_changed`, returning other non-`NONE` exits to
-    the kernel, and falling through to `R_CODE` if `c->ivau_page != 0` remains);
-  - `R_CODE`: invalidate `c->ivau_page` in place and clear it;
-  - `R_SVC`: clear `exit_info` and `excl_size`, return `APPINE_EXIT_SVC`;
-  - `R_KICK`: loop back to flush/pending checks.
-- Libc memops (`memcpy`, `memset`, `memmove`, `memcmp`, `memchr`, `strncmp`, `strlen`, `strcmp`;
-  up to 32 sorted in immutable `memop_table`): `appine_dbt_set_memops` publishes the new table
-  (`RELEASE`, chaining old tables on `older` until `drop_memops`) before retiring changed/added/
-  removed PCs. Private tagged blocks ignore memops; memop blocks bypass templates and fast loops,
-  recheck `memop_kind` under `d->lock` at `install`, and are retired before pooling in
-  `appine_dbt_free`.
-  - In-cache helpers at the base of the code cache (`dbt_routines.c`, borrowing `cpu->x[3..9]`,
-    preserving non-return regs, NZCV and lazy FP state, returning via predicted-return
-    `d->memop_ret`): probe 4 KiB `tlb` first and fall back to 2 MiB `stlb` (capped at 4 KiB for
-    `memset` and overlap-safe `memcpy`/`memmove` (`x2 >= 32`), and 64 KiB for 8-byte `memcmp`
-    (`x2 >= 8`), 8-byte SWAR `memchr`/`strncmp` (`x2 >= 1`, including `SIZE_MAX`) and
-    `strlen`/`strcmp`). On cross-superpage span, cap overflow, TLB+STLB miss or watchpoints,
-    bounded ops jump to fallback `x2 >= 128` -> `R_INTERP` (else guest code), while
-    `strlen`/`strcmp` emit an inline `R_INTERP` stub with `nguest = 1` (skipping `uses_fp` and
-    guest body).
-  - Out-of-line `exec_memop` (`dbt.c`): declines on `nwatch != 0`; translates 2 MiB L2 superpage or
-    4 KiB L3 spans via `appine_mmu_lookup_super` with TBI untagged; caps `memset`/`memcpy`/`memmove`/
-    `memcmp` at 64 MiB while scanning `memchr`/`strncmp`/`strlen`/`strcmp` up to a 64 MiB budget
-    (handling `SIZE_MAX`); pre-validates mutating ranges before writing; translates compare/scan
-    ranges lazily; preserves TBI tag in `memchr` result; warms 4 KiB `tlb` and 2 MiB `stlb` via
-    `appine_tlb_fill` for untagged 48-bit addresses across all registered ops.
+- `appine_dbt_run` delegates to `appine_cpu_run` if `d->poisoned`; syncs `DIT`, publishes `t->cpu` (`SEQ_CST`), and runs `dbt_run` under `appine_guard_run` (host fault returns `APPINE_EXIT_HOST_FAULT`, sets `d->poisoned`, wakes parked flush waiters, calls `dbt_template_clear(false)`).
+- Each `dbt_run` iteration: joins (`park`) or runs (`flush_world`) pending flushes; catches up `generation` (reset `rs`, drop `pending_relinks`, clear dirty `jc`); consumes `c->pending` (clearing `excl_size`, returning `APPINE_EXIT_KICK`); probes `t->jc` first when `patch_site == NULL` (skipping `dbt_lookup_seq`/`d->table` on hit, refreshing stale slots on miss), else `dbt_table_lookup`; on miss with `page_parked > 0`, locks and calls `dbt_revive`; else lock-free `prepare` + optional `pretranslate_cond_targets` + locked `install` (rechecking guest words and `memop_kind`; single-threaded `alone` merges block/link/pending-relink sync before `dbt_table_insert`, while multithreaded syncs/inserts the block before patching the incoming link), or `appine_interp_step` for unfetchable PCs; calls `enter(c, code)` and handles:
+  - `R_CHAIN`/`R_CHAIN_FWD`: records patch metadata (`dbt_site`, `branch_site`, `at_entry`, `shared`, `generation`, `retire_gen`, `forward`) for next lookup;
+  - `R_LOOKUP`: requests `t->jc` fill;
+  - `R_UNGROUP`: calls `dbt_ungroup` if `!c->nwatch`, falls through to Tier 0 (skipping memop);
+  - `R_INTERP`: on exact `R_INTERP` at a registered shared/untagged memop PC, tries `exec_memop` (on hit, pops matching `dbt_rs` top with `untag_pc(x30)` and sets `pc = untag_pc(x30)`); else calls `appine_interp_step` (absorbing `APPINE_EXIT_CODE` via `code_changed`, returning other non-`NONE` exits, falling through to `R_CODE` if `ivau_page != 0`);
+  - `R_CODE`: invalidates `c->ivau_page` in place and clears it;
+  - `R_SVC`: clears `exit_info` and `excl_size`, returns `APPINE_EXIT_SVC`;
+  - `R_KICK`: loops to flush/pending checks.
+- Libc memops: `appine_dbt_set_memops` sorts/deduplicates `<= 32` valid `(pc, kind)` entries, publishes immutable `memop_table` (`RELEASE`, old tables chained on `older` until `drop_memops`) if changed, then retires affected PCs. Private tagged blocks ignore memops; memop blocks bypass templates and fast loops, recheck `memop_kind` under `d->lock` at `install`, and retire before pooling in `appine_dbt_free`.
+  - In-cache helpers (`dbt_routines.c`, borrowing `cpu->x[3..9]`, preserving non-return regs, NZCV and lazy FP state, returning via `d->memop_ret`): probe 4 KiB `tlb` then 2 MiB `stlb` (watched pages miss both because they stay out of `tlb`/`stlb`). Gates and caps: `memset` and overlap-safe `memcpy`/`memmove` (`x2 >= 32`, `MEMOP_COPY_SUPER_MAX = 4 KiB`); 8 B `memcmp` (`x2 >= 8`, `MEMOP_SUPER_MAX = 64 KiB`); 8 B SWAR `memchr`/`strncmp` (`x2 >= 1`, incl. `SIZE_MAX`, 64 KiB cap); `strlen`/`strcmp` (all lengths, 64 KiB cap; `strcmp`/`strncmp` never shortcut `a == b` before NUL/`n` so unmapped tails fault accurately). On miss, cap overflow or cross-superpage span, bounded ops check `x2 >= 128` -> `R_INTERP` (else guest code), while `strlen`/`strcmp` fall into an inline `R_INTERP` stub with `nguest = 1` (skipping `uses_fp` and guest body).
+  - Out-of-line `exec_memop` (`dbt.c`): declines on `nwatch != 0`; translates 2 MiB L2 or 4 KiB L3 spans via `appine_mmu_lookup_super` (TBI untagged); caps `memset`/`memcpy`/`memmove`/`memcmp` at `64 MiB` (`MEMOP_MAX_BYTES`) and scans `memchr`/`strncmp`/`strlen`/`strcmp` up to `64 MiB` (handling `SIZE_MAX`); pre-validates mutating ranges before writing; translates compare/scan lazily; preserves TBI tag in `memchr` result; warms `tlb`/`stlb` via `appine_tlb_fill` for untagged 48-bit addresses on all registered ops.
 
-### Code cache, table, sharing and invalidation
+### Code cache, table, templates, pool and code groups
 
-- The 128 MB code cache is mapped twice via `appine_map_code` (`MAP_SHARED|MAP_ANONYMOUS` +
-  `mremap` RX alias; `MAP_PRIVATE` RWX fallback) and bump-allocated. Dead blocks reclaim no code
-  space until a full flush. For W^X caches, `note_written` sets per-host-page dirty bits;
-  `unmap_written_code` walks `pool.all` and calls `MADV_DONTNEED` on the writable alias to eliminate
-  host RssShmem double-counting, while `written_code_bytes` reports currently mapped writable bytes.
-  Opt-in `APPINE_PERF_MAP` appends block symbols to `/tmp/perf-<pid>.map` under its own lock.
-- Lock-free table: C readers load `code` (`ACQUIRE`) then `pc` (`RELAXED`); `emit_lookup` uses plain
-  `ldp` excluding `pc == 0`. Table replacement waits for active odd `dbt_lookup_seq` readers before
-  `munmap`. Starts at `2^12` slots, doubles up to `2^19` (`TABLE_LIMIT = 393,216`) at 3/4 load (or
-  rebuilds in place if tombstones >= half of occupied or at max size). Block-log compaction runs at
-  limit when `>= 1/8` of records are dead.
-- Retiring blocks (`dbt_retire_add`/`dbt_retire_flush`, batched up to 32) emits 16-word forwarding
-  stubs (`R_CHAIN` + `LINK_SHARED` for tag 0), syncs them, patches `code[0]` and atomically
-  patches `code[2]` to jump to the stub, syncs entries, writes tombstones (`JC_EMPTY`), and
-  increments `d->retire_gen` (`RELEASE`). Full flush (`flush_world`) kicks other active threads,
-  waits until all leave `dbt_run` or `park()`, clears touched slots/buckets, resets
-  `used_words = routine_words`, bumps `retire_gen` and `generation`, and broadcasts `d->flushed`.
-- Templates: 32 MB anonymous arena (`65,536` buckets, 64 shard locks, `arena_lock`, max 4 versions
-  per `pc`), keyed by `(pc, nogroup_key, regs, shared, guest words)`; cross-page templates validate
-  page 1 on fetch. A full arena triggers `dbt_template_clear(true)`, which rewinds the allocator
-  and keeps the pages resident for reuse. The high-water mark covers all allocations since the
-  last pressure trim, including earlier generations.
-- Pool: up to 16 `appine_dbt` instances (64 MB kept code budget) and 8 spare threads. Non-poisoned
-  instances with non-zero `key`, `<= 131,072` blocks, `<= 64 MB` code, no `flush_wanted` (and
-  fitting the 64 MB budget above 32 MB) drop shared/memop/private state and stay cached as `stale`;
-  otherwise they flush (clearing `nogroup_count`, `strikes` and `strikes_next`), shrink table to `2^12`, and
-  `MADV_REMOVE`/`MADV_FREE`/`MADV_DONTNEED` backing memory. `DbtSpace::new` prefers MRU matching
-  `(key, regs)`, else an empty instance (regenerating routines if `regs` differs), else allocates.
-  `trim_dbt_pool` drains `pool.free` and `pool.threads` under `pool.lock`, then releases the
-  evicted instances and detached workspaces outside the lock. `dbt_template_trim` then takes
-  shard locks in ascending order followed by `arena_lock` (guarded together), clears the bucket
-  array if the cursor is nonzero, and applies `MADV_DONTNEED` through the arena high-water mark.
-  When both the cursor and high-water mark are zero, template trim skips the locks and buckets.
-- Stale reuse: `trust` marks exact `DbtSource` matches trusted and prior `set_sources` ranges
-  parkable. First `dbt_run` runs `dbt_recheck`: unmapped single-page parkable blocks are parked;
-  cross-page and other mismatches are invalidated; if non-parkable mismatches exceed half of live
-  blocks, a full flush is requested instead. First lookup miss on a page with `page_parked > 0`
-  calls `dbt_revive`, restoring matching blocks in batches of 32 and relinking tombstones in place
-  (skipping and killing any parked block whose key is already live; `dbt_table_insert` also kills
-  any parked duplicate in the page bucket when installing a fresh block).
-- Code groups: `new_tag` issues `1..65535` (0 when exhausted); `share` publishes immutable sorted
-  `shared_ranges` (tag 0 vs private `tag`); `retire_outside` retires tag-0 blocks outside shared
-  ranges before multi-member sharing.
-- Invalidation (`dbt_invalidate_locked`): with `mmu != NULL` (always true from Rust
-  `Dbt::invalidate`; C also supports `NULL` for unconditional invalidation including parked blocks),
-  compares saved words (across both pages for cross-page blocks) and leaves parked blocks alone.
-  Ranges spanning `> 256` pages (`last - first >= INVALIDATE_MAX_PAGES`) or wrapping around scan
-  `blocks[]` linearly; non-wrapping ranges of `<= 256` pages scan page buckets `[first..last]`
-  (plus `first - 1` when `first > 0 && cross_page_blocks > 0`), unlinking dead records. `ic ivau`
-  invalidates in place via `R_CODE` / absorbed `APPINE_EXIT_CODE`.
+- W^X code cache: 128 MB mapped twice via `appine_map_code` (`MAP_SHARED|MAP_ANONYMOUS` + `mremap` RX alias; `MAP_PRIVATE` RWX fallback) and bump-allocated; dead blocks reclaim space only on full flush. On W^X caches, `note_written` sets per-host-page dirty bits; `appine_dbt_unmap_written` walks `pool.all` calling `MADV_DONTNEED` on the writable alias (eliminating RssShmem double-counting), and `appine_dbt_written_bytes` reports mapped writable bytes. Opt-in `APPINE_PERF_MAP` appends `g_<pc>` entries to `/tmp/perf-<pid>.map` under its own lock.
+- Lock-free table and compaction: C readers (`dbt_table_find_for`) load `code` (`ACQUIRE`) then `pc` (`RELAXED`); `emit_lookup` uses plain `ldp` excluding `pc == 0`. `table_publish` swaps `d->table` (`SEQ_CST`) and spins on active odd `dbt_lookup_seq` readers before `munmap`. Starts at `2^12` slots, doubles up to `2^19` (`TABLE_LIMIT = 393,216`) at 3/4 load (rebuilding in place if `table_dead * 2 >= table_occupied` or at `2^19`). `dbt_compact_blocks` compacts `blocks[]`/`words[]` at limit when `blocks_dead * 8 >= table_count`.
+- Retirement and full flush: `dbt_retire_add`/`dbt_retire_flush` (batches `<= 32`) emit 16-word forwarding stubs (`R_CHAIN` + `LINK_SHARED` for tag 0), sync them, patch `code[0]` and atomically store `code[ENTRY_CHECK_WORDS] = b -8`, sync entries, write `JC_EMPTY` tombstones, and bump `retire_gen` (`RELEASE`). `flush_world` kicks active peers (`t->cpu != NULL`), waits until all leave `dbt_run` or `park()`, runs `dbt_flush_locked` (clearing `table_used`/buckets, resetting `used_words = routine_words`, bumping `retire_gen`/`generation`), and broadcasts `d->flushed`. `lock_dbt` spins `<= 200` `yield`s before blocking.
+- Templates: 32 MB anonymous arena (`65,536` buckets, 64 shard locks, `arena_lock`, `<= 4` versions/`pc`), keyed by `(pc, nogroup_key, r, shared, guest words)`; cross-page templates validate page 1 on fetch. Full arena triggers `dbt_template_clear(true)` (rewinding `used`, keeping pages resident); `high` tracks peak allocation since last `dbt_template_trim`.
+- Pool and trimming: `<= 16` instances (64 MB kept-code cap) and `<= 8` spare threads. Non-poisoned instances with `key != 0`, `table_count <= 131,072`, `words <= 64 MB`, `!flush_wanted` (and fitting the 64 MB cap when `> 32 MB`) drop `shared`/memops/private blocks (retiring memop PCs first, rechecking size) and stay cached as `stale`; else they flush (clearing `nogroup_count`, `strikes`, `strikes_next`), shrink `table` to `2^12`, and `MADV_REMOVE`/`MADV_FREE`/`MADV_DONTNEED` backing memory. `DbtSpace::new` prefers MRU matching `(key, regs)`, else an empty instance (regenerating routines if `regs` differs), else allocates. `trim_dbt_pool` drains `pool.free`/`pool.threads` under `pool.lock`, releases them outside the lock, then calls `dbt_template_trim` (locking shards ascending then `arena_lock` under one guard callback, resetting buckets, `MADV_DONTNEED`ing through `high`; skipped lock-free when `used == 0 && high == 0`).
+- Stale reuse and revival: `trust` marks exact `DbtSource` matches trusted and prior `set_sources` ranges parkable. First `dbt_run` runs `dbt_recheck`: unmapped single-page parkable blocks park; cross-page and other mismatches count as `bad`; `bad * 2 > live` requests a full flush. First miss on a page with `page_parked > 0` calls `dbt_revive`, restoring matching blocks in batches of 32 and relinking tombstones in place (killing parked duplicates already in `d->table`, stopping on unmapped page or 3/4 load; `dbt_table_insert` also kills bucket duplicates).
+- Code groups and invalidation: `new_tag` issues `1..65535` (0 when exhausted); `share` sorts/merges ranges and publishes immutable `shared_ranges` (`RELEASE`, tag 0 vs private `tag`); `retire_outside` retires tag-0 blocks outside shared ranges (including parked). `dbt_invalidate_locked` with `mmu != NULL` (always from Rust `Dbt::invalidate`; C allows `NULL` for unconditional invalidation including parked) compares saved words (both pages for cross-page blocks) and skips parked blocks. Ranges `> 256` pages (`last - first >= INVALIDATE_MAX_PAGES`) or wrapping scan `blocks[]` linearly; smaller ranges scan buckets `[first..last]` (plus `first - 1` when `first > 0 && cross_page_blocks > 0`), unlinking dead records. `ic ivau` invalidates in place via `R_CODE` / absorbed `APPINE_EXIT_CODE`.
 
 ## Dependencies (inbound / outbound)
 
 ### Inbound
 
-- `kernel/process`: task run loop (`Dbt::attach`/`run`/`invalidate`/`flush`, exit handling,
-  leftover `ivau_page`, kicks).
-- `kernel/mmu`: `DbtSpace` lifecycle, code groups (`new_tag`/`share`/`retire_outside`), stale reuse
-  (`set_sources`/`trust`), and `set_memops`.
-- `kernel/exec`: `DbtRegs` selection (Go build-ID / `APPINE_DBT_REGS`) and bundled musl `DbtMemop`
-  discovery.
-- `kernel/oom` uses `written_code_bytes` for RSS accounting and periodically calls
-  `unmap_written_code`. Root pressure and cgroup `memory.high` trigger both `trim_dbt_pool` and
-  `unmap_written_code`. The host can also trigger `trim_dbt_pool` through `Machine::trim_memory`.
-- `engine` tests (`core/engine/tests/dbt.rs`) and `tests/lockstep`.
+- `kernel/process`: task run loop (`Dbt::attach`/`run`/`invalidate`/`flush`, exit handling, leftover `ivau_page`, kicks).
+- `kernel/mmu`: `DbtSpace` lifecycle, code groups (`new_tag`/`share`/`retire_outside`), stale reuse (`set_sources`/`trust`), `set_memops`.
+- `kernel/exec`: `DbtRegs` selection (Go build-ID / `APPINE_DBT_REGS`) and bundled musl `DbtMemop` discovery (`MEMOP_*`).
+- `kernel/oom`: `written_code_bytes` RSS subtraction, periodic `unmap_written_code`, and pressure / `Machine::trim_memory` calls to `trim_dbt_pool` and `unmap_written_code`.
+- `core/engine/tests/dbt.rs`, `core/engine/tests/dbt_loop.rs`, and `tests/lockstep`.
 
 ### Outbound
 
-- `engine`: `struct appine_cpu` layout (`dbt_*`, `dbt_groups[8]`, `ivau_page`, `excl_*`, `tlb`,
-  `tlb_used`, `stlb`, `stlb_used`, `nwatch`), `appine_interp_step`/`exec`, `appine_simd_dp_decode`,
-  `appine_has`/`appine_has2`/`appine_native_available`, `fpcr_write_mask`, `appine_sync_dit`,
-  `appine_cpu_run`/`kick`/`init`, `appine_map_code`/`unmap_code`, `appine_guard_run`/`hold`/
-  `hold_fn`/`drop`/`fail`, and `sync_code_ranges`/`publish_code_lazily`.
-- `kernel/mmu`: 4-level 9-bit radix page-table layout (`PTE_SUPER_BIT`, `APPINE_PROT_*`),
-  `appine_mmu_translate`, `appine_mmu_lookup_super`, and `appine_tlb_fill`.
-- Host: `mmap`/`mremap`/`madvise`/`munmap`, pthreads (mutexes, condvars), icache maintenance, and
-  opt-in `APPINE_PERF_MAP` (`/tmp/perf-<pid>.map`).
+- `engine`: `struct appine_cpu` layout (`dbt_*`, `dbt_groups[8]`, `ivau_page`, `excl_*`, `tlb`, `tlb_used`, `stlb`, `stlb_used`, `nwatch`, `dit`), `appine_interp_step`/`exec`, `appine_simd_dp_decode`, `appine_has`, `appine_id_register`, `appine_native_available`, `fpcr_write_mask`, `appine_sync_dit`, `untag`/`untag_pc`, `clear_exclusive`, `appine_cpu_run`/`kick`/`init`, `appine_map_code`/`unmap_code`, `appine_guard_run`/`hold`/`hold_fn`/`drop`/`fail`, `sync_code_ranges`/`publish_code_lazily`.
+- `kernel/mmu`: 4-level 9-bit radix layout (`MMU_LEVELS`, `MMU_SUPER_*`, `PTE_SUPER_BIT`, `PTE_PROT_MASK`, `APPINE_PROT_*`), `appine_mmu_translate`, `appine_mmu_lookup_super`, `appine_tlb_fill`.
+- Host: `mmap`/`mremap`/`madvise`/`munmap`, pthreads (mutexes, condvars), `sched_yield`, `sysconf`, icache maintenance, opt-in `APPINE_PERF_MAP` (`/tmp/perf-<pid>.map`).
 
 ## Invariants and gotchas
 
-- Tier 1 must match Tier 0 on every instruction via `dbt_tier0_defined` and
-  `appine_simd_dp_decode`; precise guest exceptions come from checking before mutating, never from
-  catching host signals.
-- While translated code runs, `struct appine_cpu` does not hold live guest registers (routines also
-  borrow `cpu->x[0..9]`, safe only because neither `Default` nor `Go` steals `x0..x15`, and `STXR`
-  borrows `x0..x2`). `struct appine_cpu` offsets (`TLB_OFF`, `STLB_OFF`, `dbt_groups`) are pinned
-  by `_Static_assert`s.
-- Guest FPCR stays unchanged during translated execution (changed masked writes exit `R_INTERP`),
-  so `d->exit` intentionally does not save host FPCR. Host `x18` is never touched.
-- Write TLB refills unconditionally require `APPINE_PROT_READ | APPINE_PROT_WRITE` so write-only
-  pages always fall back to Tier 0 and write-half hits safely serve atomics and grouped reads.
-- Every lock acquired inside `appine_guard_run` must be registered with `appine_guard_hold`/
-  `hold_fn` (within `MAX_LOCKS = 4`), and guarded paths must not call `malloc` (sole exception:
-  opt-in `APPINE_PERF_MAP` in `install`).
-- Code inspection reads through the execute alias (`*site`), never `rw(d, site)`, to avoid host
-  read fault-around faulting untracked pages into the writable W^X alias.
-- `emit_lookup` excludes `pc == 0` so an unordered `ldp` racing `dbt_table_insert` cannot match
-  new `code` with an empty slot's `key == 0`.
-- `table_relink` must reuse a parked block's original tombstone slot so `dbt_flush_locked` (which
-  clears only `table_used` indices) does not leak tombstones.
-- Known-address TLB checks rely on exact block-local `konst` invalidation; a stale constant would
-  bypass cross-page detection.
-- `set_memops` publishes `d->memops` before retiring blocks and `install` rechecks `memop_kind`
-  under `d->lock`, preventing stale memop blocks across updates or pooling.
-- `d->cross_page_blocks` is incremented on insert and only recomputed on compaction or cleared on
-  full flush, so small-range invalidation may conservatively scan bucket `first - 1` after cross-page
-  blocks are retired. Cross-page blocks are never parked, and `dbt_ungroup` only scans one page
-  bucket because fast loops never emit `R_UNGROUP`.
-- `appine_dbt_run` absorbs `R_CODE` and Tier 0 `APPINE_EXIT_CODE` in place, but returns immediately
-  on other Tier 0 exits leaving any pending `c->ivau_page` for the kernel caller to invalidate.
-- Any new Tier 1 instruction touching host V/FPCR/FPSR must be included in `insn_uses_fp`, and any
-  new exit bypassing `d->exit` must clear `dbt_fp_loaded`.
-
-## Confirmed bugs / technical debt
-
-None.
+- Tier 1 matches Tier 0 via `dbt_tier0_defined` (`dbt_tier0_base_defined` parity with `interp.c`) and `appine_simd_dp_decode`; precise guest exceptions come from pre-checking, never catching host signals.
+- During translated execution `struct appine_cpu` holds no live guest GPRs: routines borrow `cpu->x[0..9]` (`refill`: `x[0..5]`, `lookup`: `x[0..3]`, memops: `x[3..9]`) and `STXR`/`STXP` borrow unused `x0..x15` saved in `cpu->x[]` — safe only because neither `Default` nor `Go` steals `x0..x15`. `appine_cpu` offsets (`TLB_OFF`, `STLB_OFF`, `dbt_groups`, `dbt_fp_loaded`, `nwatch`, `dbt_rs`, `dbt_jump_cache`) are `_Static_assert`-pinned.
+- Translated code never mutates host FPCR (changed masked writes exit `R_INTERP`), so `d->exit` never saves host FPCR and restores it only when differing from `cpu->fpcr`. Host `x18` is never touched.
+- Write TLB refills require `APPINE_PROT_READ | APPINE_PROT_WRITE` so write-only pages fall back to Tier 0 and write-half hits safely serve atomics and grouped reads.
+- Every lock acquired inside `appine_guard_run` must register with `appine_guard_hold`/`hold_fn` (`MAX_LOCKS = 4`), and guarded paths must not call `malloc` (sole exception: opt-in `APPINE_PERF_MAP` in `install`).
+- Code inspection reads through the execute alias (`*site`), never `rw(d, site)`, avoiding host fault-around mapping untracked pages into the writable W^X alias.
+- `emit_lookup` excludes `pc == 0` so an unordered `ldp` racing `dbt_table_insert` cannot pair new `code` with an empty slot's `key == 0`.
+- `table_relink` must reuse a parked block's original tombstone slot so `dbt_flush_locked` (clearing only `table_used` indices) never leaks tombstones.
+- Known-address TLB checks rely on exact block-local `konst` invalidation; stale constants bypass cross-page detection.
+- `set_memops` publishes `d->memops` before retiring blocks and `install` rechecks `memop_kind` under `d->lock`, preventing stale memop blocks across updates or pooling.
+- `d->cross_page_blocks` increments on insert and recomputes only on compaction or full flush, so small-range invalidation may conservatively scan bucket `first - 1` after retirement. Cross-page blocks are never parked, and `dbt_ungroup` scans one page bucket because fast loops never emit `R_UNGROUP`.
+- `appine_dbt_run` absorbs `R_CODE` and Tier 0 `APPINE_EXIT_CODE` in place, returning immediately on other Tier 0 exits with any pending `c->ivau_page` left for the kernel caller.
+- Any new Tier 1 instruction touching host V/FPCR/FPSR must be recognized by `insn_uses_fp`, and any exit bypassing `d->exit` must clear `dbt_fp_loaded`.
+- `TO_COUNT` (14) must stay `<= 16` (4-bit relocation tag), and `dbt_emit_routines` must stay `< MAX_BLOCK_WORDS` (4096).
+- Template copies reproduce fresh translations with no runtime self-check; `emit_fill`'s radix walk relies on ARMv8 address-dependency ordering of plain loads rather than `ldar` acquire loads (as in `mmu.c`).
 
 ## Open questions
 
 None.
-
-## To verify
-
-- Template copies reproduce a fresh translation exactly; there is no runtime self-check.
-- Tier 1's page-table walk uses plain, address-dependent loads where `mmu.c` uses acquire loads;
-  only architectural reasoning in comments argues they are equivalent.
