@@ -2,7 +2,7 @@
 
 > Snapshot of current consensus. Evolution: `git log --grep="MODULE: kernel/exec"`
 >
-> Last distilled: 2026-11-26 (HEAD = e8ac8ebf)
+> Last distilled: 2026-11-27 (HEAD = 2f321b12)
 >
 > Decisions on execve and the ELF loader made before kernel/exec was split from kernel/process keep their `kernel/process` tags and live in `.agents/decisions/kernel/process.md`: D7, D17, D31, D41, D43, D46 and D51.
 
@@ -86,6 +86,14 @@
 - **Tradeoffs**: Processes receive a 128 TiB default window instead of 256 TiB for initial stack placement and non-fixed mappings.
 - **Watch out**: Keep `STACK_TOP` and ELF segment upper-bound checks aligned with `kernel/mm`'s `mmap_top` and `1 << VA_BITS` bounds.
 - **Source**: 7e2143cf
+
+### D11: Bundled Alpine musl memop discovery includes `strlen` and `strcmp` under the SHA-256 trust boundary
+
+- **What**: `loader.rs::memop_kind_for` registers `strlen` (`MEMOP_STRLEN`) and `strcmp` (`MEMOP_STRCMP`) alongside the existing length-bounded memops under the `STB_GLOBAL`/`STB_WEAK`, `STT_FUNC`, executable `PT_LOAD`, and SHA-256-verified read-only `memfd` snapshot checks (using 8 of 32 `APPINE_DBT_MEMOPS` slots on Alpine 3.24.3 musl).
+- **Why**: Filtering out `strlen` and `strcmp` prevented bundled Alpine musl workloads from using Tier 1's SWAR and `exec_memop` fast paths.
+- **Tradeoffs**: Acceleration stays limited to the pinned bundled Alpine musl snapshot while static binaries and unpinned glibc continue running translated guest code.
+- **Watch out**: Updating the bundled Alpine musl archive requires re-verifying that `strlen` and `strcmp` stay `STT_FUNC` inside executable `PT_LOAD` and total discovered memops stay within `APPINE_DBT_MEMOPS`.
+- **Source**: fc34ad74
 
 ## Superseded
 

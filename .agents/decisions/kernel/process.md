@@ -2,7 +2,7 @@
 
 > Snapshot of current consensus. Evolution: `git log --grep="MODULE: kernel/process"`
 >
-> Last distilled: 2026-11-26 (HEAD = e8ac8ebf). D1–D13 were seeded by hand from the retired design
+> Last distilled: 2026-11-27 (HEAD = 2f321b12). D1–D13 were seeded by hand from the retired design
 > doc §6 and the round records in `docs/rounds/`, so their sources cite rounds; later entries cite
 > commits.
 
@@ -196,6 +196,46 @@
 - **Watch out**: Preserve atomic validation before committing `t.sched` (D61) and always consult the target thread group's limits rather than the caller's.
 - **Source**: 0ddd8d50, ee941aed
 
+### D74: `Kernel::open_files_matching` deduplicates descriptor tables via a pointer set and filters before cloning
+
+- **What**: `Kernel::open_files_matching(pred)` deduplicates fd tables by pointer in a `HashSet` and clones only handles matching the caller's predicate, keeping `open_files()` for whole-kernel scans.
+- **Why**: `Kernel::open_files()` previously performed quadratic fd-table deduplication and cloned every open handle across all processes even for single-inode lookups such as `opens_of`.
+- **Tradeoffs**: Whole-kernel reconciliation scans allocate a small `HashSet` when many processes exist.
+- **Watch out**: Predicates passed to `open_files_matching` must not re-entrantly borrow `RefCell` state already held by the scan.
+- **Source**: b38371ff
+
+### D75: Read-only ID syscalls run on the `Fast` path gated by `fast_epoch`
+
+- **What**: `Fast` caches namespace-translated `ns_tgid`, `ns_ppid`, `ns_tid`, `uid`, `euid`, `gid`, and `egid` to dispatch `getpid`, `getppid`, `gettid`, `getuid`, `geteuid`, `getgid`, and `getegid` without the BKL while `fast_epoch` matches, sharing the epoch with `Kernel::fast_changed()` so `uid_map`/`gid_map` writes and live child reparenting in `finish_group` invalidate stale caches.
+- **Why**: Frequent read-only ID queries otherwise acquired the BKL solely to return rarely changing namespace-translated values.
+- **Tradeoffs**: `Fast` stores the cached IDs and performs an `Acquire` epoch load per fast ID call, and reparenting live children invalidates fast caches once per exiting parent.
+- **Watch out**: Every path mutating credentials, tids, `ThreadGroup::ppid` of a live process, or user-namespace ID maps must call `Shared::fast_changed()` or `Kernel::fast_changed()` to avoid serving stale IDs.
+- **Source**: a1fe8a19, de152464
+
+### D76: `TaskSync` is cache-line aligned, non-sleeping fast syscalls stay in guest mode, and post-syscall sweeps are dirty-gated
+
+- **What**: `TaskSync` is 64-byte aligned, `FastOutcome::{InGuest, LeftGuest, Fallback}` keeps non-sleeping fast syscalls in guest mode (skipping `KernelEntry`, `in_guest` toggling, `resume_checks`, and TLB/space reloads while Tier 1 polls `generations.code`), full guest entry uses a relaxed `in_guest` store plus `SeqCst` fence and relaxed generation loads (with an `Acquire` fence before TLB flushes), and `post_syscall_sweeps` checks thread-local, per-`Vfs`, per-`Store`, per-`Kernel`, and global dirty flags before running sweeps.
+- **Why**: Unaligned `TaskSync` caused false sharing on `in_guest`, non-sleeping fast syscalls paid unnecessary `KernelEntry` and barrier costs, and `post_syscall_sweeps` cloned `Vfs` and borrowed `RefCell`s even when nothing was pending.
+- **Tradeoffs**: Non-sleeping fast syscalls leave `KernelEntry` unpopulated (matching Linux's `"running\n"` `/proc/<pid>/syscall` output), and every sweep producer must keep its dirty flag synchronized.
+- **Watch out**: Missing a dirty-flag set or early return delays or skips cleanup, and single-stepped tasks must keep returning `Fallback` from `Fast::syscall` because `Cpu::step` does not check `cpu->pending`.
+- **Source**: da5ba1ef
+
+### D77: `Bkl::drop` guards panic-catch wrappers and reuses `PENDING` capacity, while `Hold::held` occupies its own cache line
+
+- **What**: `Bkl::drop` skips `bug::catch` when `has_closed()` or `has_pending_wakeups()` is false, retains cleared `PENDING` vector capacity after `flush_wakeups`, and places `Hold::held` on its own 64-byte cache line ahead of 64-byte-aligned `HoldInfo`.
+- **Why**: Unconditional `catch_unwind` entries and dropped `PENDING` allocations added overhead to every BKL release, and `Hold::held` false-shared a cache line with `Hold::record`'s stores during BKL spinning.
+- **Tradeoffs**: `Hold` grows from 64 bytes to 128 bytes.
+- **Watch out**: Keep `Hold::held` isolated from `HoldInfo` fields written by `Hold::record` (and keep `kernel/bug` synchronized with `Hold`'s two-cache-line layout).
+- **Source**: de152464
+
+### D78: `Machine::wait_deadline` resolves a single console wake object lazily under the BKL
+
+- **What**: `Machine::wait_deadline` resolves an optional `wake::Object` lazily under its existing BKL hold only when blocking is required (replacing `wait_objects`, with `wait_on`/`wait_until` passing `|_| None`), and `Machine::read_console_run_state` backs `read_console_run_timeout`.
+- **Why**: `Machine::read_console`, `read_console_run_timeout`, and `write_console` previously took an extra BKL lock solely to query console wake objects before entering the wait loop.
+- **Tradeoffs**: `Machine::wait_deadline` supports at most one wake object per wait, matching current `Machine` callers.
+- **Watch out**: Generalize `wait_deadline` from `Option<wake::Object>` back to a slice if a future `Machine` helper must wait on multiple wake objects at once.
+- **Source**: 2f321b12
+
 ## Superseded
 
 - ~~Deadlines stay plain `Instant`s (D15 in part, 96cd8bd)~~ → replaced by **D19** in 63b9e59 (2026-11-07)
@@ -208,3 +248,6 @@
 - ~~Spawning a separate `bkl-watchdog-log` thread per ended stall under D38 in d20fd3c~~ → replaced by **D38** in 1e6c63a9 (2026-11-21).
 - ~~D14 ownership of bug containment and the BKL watchdog (dd6c288, d2b1dc3, 8a17e4a9)~~ → replaced by **D14** and kernel/bug **D1** in e4d7bbe5 (2026-11-22).
 - ~~`sched_setattr` applies policy before validating nice (D27's caveat, 70c1bc6, dcacfb6)~~ → replaced by **D61** in 849bf98a (2026-11-23, no SUPERSEDES declared).
+- ~~Keeping `getppid` on the BKL path because reparenting did not bump `fast_epoch` (a1fe8a19)~~ → replaced by **D75** in de152464 (2026-11-27, no SUPERSEDES declared).
+- ~~Recording `TaskSync::KernelEntry` on non-sleeping fast-path syscalls (D55 in part, f1212d8)~~ → narrowed by **D76** in da5ba1ef (2026-11-27, no SUPERSEDES declared).
+- ~~Keeping `Hold::held` and `HoldInfo` on one 64-byte cache line (D38 in part, 64a6107) and entering `bug::catch` unconditionally on every `Bkl::drop` (D63 in part, 15347732)~~ → refined by **D77** in de152464 (2026-11-27, no SUPERSEDES declared).

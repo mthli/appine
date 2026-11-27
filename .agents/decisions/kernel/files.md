@@ -2,7 +2,7 @@
 
 > Snapshot of current consensus. Evolution: `git log --grep="MODULE: kernel/files"`
 >
-> Last distilled: 2026-11-26 (HEAD = e8ac8ebf)
+> Last distilled: 2026-11-27 (HEAD = 2f321b12)
 >
 > Decisions on open files made before kernel/files was split from kernel/vfs keep their `kernel/vfs` tags and live in `.agents/decisions/kernel/vfs.md`: D5, D11, D17, D22, D24, D26, D27, D29, D33, D34, D41, D44, D45, the owner half of D25, the `open_pseudo` half of D19 and the file I/O halves of D36 and D37; the pre-split fd reservation decision is D55.
 
@@ -151,6 +151,14 @@
 - **Tradeoffs**: `OpenFile::node()` checks `fuse::id_of(ino)` across pipe, device, PTY, render and `FuseDev` kinds, and `open_fuse_snapshot` callers construct `FuseSnapshot` before permission checks.
 - **Watch out**: Store inode numbers must stay below `2^62` so they never collide with `fuse::key(id)`.
 - **Source**: 7b505898, 263e23bc
+
+### D19: Plain `openat(O_CREAT)` resolves parents in one walk with deferred `display_path` and stack path reads
+
+- **What**: Resolve the parent first in `open_path_with` for plain final components when `O_CREAT` is set with no `RESOLVE_*` flags (falling back to a full walk for non-`O_EXCL` symlinks), defer `display_path` until open succeeds with a `dir == root` shortcut, and read guest paths into a 256-byte stack-inline `PathBytes` buffer via `Mm::read_cstr_into`.
+- **Why**: Creating files walked the full path twice, `display_path` climbed to root even on failed or magic-link opens, and `read_path` heap-allocated a `Vec<u8>` on every path syscall.
+- **Tradeoffs**: `openat2` with non-zero `RESOLVE_*` flags stays on `walk_resolve` to preserve `BENEATH`/`NO_XDEV` root history, and `PathBytes` uses 264 bytes of stack space.
+- **Watch out**: Any new `open_path_with` branch overriding `display_path` must set `display_set = true`, and `Vfs::resolve_parent_with` error-order changes now affect the `O_CREAT` fast path.
+- **Source**: 99a9b186
 
 ## Superseded
 

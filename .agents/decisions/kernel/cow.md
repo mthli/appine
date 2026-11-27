@@ -2,7 +2,7 @@
 
 > Snapshot of current consensus. Evolution: `git log --grep="MODULE: kernel/cow"`
 >
-> Last distilled: 2026-11-26 (HEAD = 3ad68857)
+> Last distilled: 2026-11-27 (HEAD = 2f321b12)
 >
 > Decisions on kernel/cow made before it was split from kernel/mm keep their `kernel/mm` tags and live in `.agents/decisions/kernel/mm.md`: D6, D10, D11, D19, D24, D25 and the fork/copy-on-write parts of D15, D16, D18, D20, D22, D31 and D39.
 
@@ -39,3 +39,11 @@
 - **Tradeoffs**: VMA metadata must survive splits and moves.
 - **Watch out**: Forced kernel writes must not acquire this accounting bit.
 - **Source**: 9d0ad1b6
+
+### D5: Small writable private-file fork views are pooled and `private_pages` sampling is shared
+
+- **What**: Pool one released `ForkFileView` per small (`<= 64 KiB`) writable `PrivateFile` VMA, share one `appine_hal::private_pages` sample between `anon_vma_fork` and `copy_private_file`, and finalize `probe_writes` before fork lending.
+- **Why**: Per-VMA host `mmap`, `fstat`, and repeated pagemap sampling on small writable private-file VMAs regressed `spawnbench` `fork`/`exec` latency by 13–20%.
+- **Tradeoffs**: Retains at most one idle 64 KiB file mapping per fork family's small writable private-file VMA until the parent VMA drops.
+- **Watch out**: Returning a `ForkFileView` without first discarding its prior user's pages via `MADV_DONTNEED` would leak dirty private data to the next forked child.
+- **Source**: b38371ff

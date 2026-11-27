@@ -2,7 +2,7 @@
 
 > Snapshot of current consensus. Evolution: `git log --grep="MODULE: kernel/tty"`
 >
-> Last distilled: 2026-11-26 (HEAD = e8ac8ebf). D1–D8 were seeded by hand from the retired design doc
+> Last distilled: 2026-11-27 (HEAD = 2f321b12). D1–D8 were seeded by hand from the retired design doc
 > §9 and the round records in `docs/rounds/`, so their sources cite rounds; later entries cite
 > commits.
 
@@ -192,6 +192,22 @@
 - **Tradeoffs**: Processes without a controlling terminal receive `ENXIO` on `/dev/console`, and processes with a controlling terminal alias their own PTY when opening it.
 - **Watch out**: Revisit (for example with a `ttynull`-style sink) only if a concrete guest daemon or init workload fails from `ENXIO` on `/dev/console`.
 - **Source**: 8e6c5df1
+
+### D27: `Tty::write_output` batches raw and printable-ASCII output runs
+
+- **What**: `Tty::write_output` bulk-extends directly when `!OPOST`, and when `OPOST && !OLCUC` scans maximal printable ASCII runs (`0x20..=0x7e`) clamped to remaining `OUTPUT_MAX` room with inline `ONLCR` handling while delegating remaining bytes to `processed_len` and `output_char`.
+- **Why**: Byte-by-byte processing through `processed_len`, `output_char`, and `push_back` dominated PTY throughput during bulk terminal output.
+- **Tradeoffs**: Adds fast-path scanning logic in `Tty::write_output` while keeping the Starnix-derived `output_char` unchanged.
+- **Watch out**: Exclude any future `output_char` flag affecting printable ASCII without `OLCUC` from `write_output`'s fast-path guard.
+- **Source**: de152464
+
+### D28: Console reads sample output and foreground state in one BKL hold with a stack-allocated wake object
+
+- **What**: `terminal::wake_object` returns a stack `Option<wake::Object>` instead of a heap `Vec`, and `take_output_run_state` returns a `ConsoleRead` combining output, `password_input`, `fg_pgrp`, and a zero-allocation `ConsoleForegroundKey` from one `tty` borrow.
+- **Why**: The Android terminal pump previously took separate BKL acquisitions for wake objects, output runs, password mode, and foreground process state, and `wake_objects` heap-allocated a one-element `Vec` on every wait.
+- **Tradeoffs**: Each non-empty `take_output_run_state` does two `BTreeMap` lookups and copies a 16-byte `comm` under the BKL even if the caller skips foreground cache updates.
+- **Watch out**: `ConsoleForegroundKey` detects `execve` and `PR_SET_NAME` via `Rc::as_ptr(&res.mm)`, `mm.args`, and `comm`, so in-place guest `argv` overwrites without `execve` are not detected by the key.
+- **Source**: 2f321b12
 
 ## Superseded
 

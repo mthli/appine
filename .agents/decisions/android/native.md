@@ -2,7 +2,7 @@
 
 > Snapshot of current consensus. Evolution: `git log --grep="MODULE: android/native"`
 >
-> Last distilled: 2026-11-26 (HEAD = 3ad68857). D1–D4 were seeded by hand from the retired design
+> Last distilled: 2026-11-27 (HEAD = 2f321b12). D1–D4 were seeded by hand from the retired design
 > doc §11 and the round records in `docs/rounds/`, so their sources cite rounds; later entries cite
 > commits.
 
@@ -26,6 +26,23 @@
 
 - **D35** — Native.writeFile uses one JNI symbol and Kotlin zero defaults for optional uid/gid (no Java five-argument overload), and callers must reject negatives before Rust converts to u32 (125f3d00)
 
+> Full text of D2, D3, D8, D9, D10, D16, D19, D20, D23, D27, D29, D30, D31, D32: `git show 1ea0c1ef9d686d7126bec2029fc928d4f6fdfc6b:.agents/decisions/android/native.md`
+
+- **D2** — Debug APKs build `arm64-v8a` with the release profile plus `test-hooks` and `borrow-check` while release APKs use `android-release` without `test-hooks` (checked in `.so`, `android/build` D5), so Rust debug assertions never run on Android (rounds 07 (`07-m5`), 21 (`21-robustness-finish`), 89 (`89-release-borrow-check`); 7b3e57c5)
+- **D3** — The APK targets `arm64-v8a` only (minSdk 30, target 37) with `useLegacyPackaging = false` for 16 KB-aligned uncompressed `.so` mapping and `rootfs.tgz` to prevent AAPT unpacking, linking API 30 bionic so newer libc functions fail `dlopen` on older devices (round 07 (`07-m5`); 0709982)
+- **D8** — Instrumentation verifies pinned-length download caps (`file:` URLs only), homeless/`/` DocumentsProvider accounts (needing distinct login settings to avoid cached homes), and repeated saved-tab reads before kernel start assuming transcripts are the only `.txt` files in `files/tabs` (544418f, 711b034, d5dbe29; 7c35183)
+- **D9** — `Native.kt` and `hosts/android/src/lib.rs` follow a kernel's lifecycle (`MACHINES` opening the kernel section, helpers last) and `MachineTest` groups by app flow, so new JNI functions must be placed in matching order in both files (a546fea, 55d75ac)
+- **D10** — `kotlin.compilerOptions.allWarningsAsErrors` and `lint.warningsAsErrors` fail local and CI builds (keeping five external-data lint checks informational), so SDK/AGP/library upgrades or dropped informational issue IDs can surface new build failures (4c1a3ce)
+- **D16** — `Native.start` passes `exception_trace: true` for every kernel start so unhandled guest faults reach dmesg bug reports without a UI toggle, and `MachineTest.guestCrashesReachTheKernelLog` expects the `undefined[400000+1000]` mapping layout from `elf()` (7b7f73b)
+- **D19** — Prompt-mark instrumentation checks explicit ash B/continuation marks, customized/nested ash, and fresh Alpine bash imports while stripping controls for text checks, so raw-byte assertions must track profile updates and isolated runs need the app stopped to free the store lock (6c5f921, 2b04a43; a809c5a8; 7aa817af; 20137e4c; d053be24; 39e55b4b)
+- **D20** — `build.gradle.kts` stays one file (configuration before task classes, which must not capture script-level members) with a libraries-only version catalog (`AGP` separate), `newestFetched` inputs, and static notices replacing `NoticesTask` (D24) (ef7a803; bd580227; d053be24; 39e55b4b)
+- **D23** — `Native.guestCpuTime` exposes a guarded guest-only CPU aggregate (-1 when unavailable, conservatively preserving wakefulness) with both-tier/idle/stopped test coverage on an API 34 emulator only, leaving physical hardware and 16 KB pages unverified (1e5de64e; 20137e4c; d053be24; 39e55b4b)
+- **D27** — `TerminalInputTest` uses an isolated rootfs, shell-free session (supplied via reflection), and capturing host to verify real IME encoding, confirmation dialogs, and paste handling, leaving real keyboard UI, physical devices, and 16 KB pages unverified (6f5be4da; d053be24; 39e55b4b)
+- **D29** — `TerminalFilesTest` runs seven arm64 bundled-rootfs cases covering copies, collisions, sanitization, home confinement, failures, literal shell arguments, and locked-picker retention, leaving cloud/vendor pickers, physical devices, and process interruption unverified (165b5f99; d053be24; 39e55b4b)
+- **D30** — Seven isolated view-pixel tests (pre-split, now `android/tests`) verify resize-preview release and detach cleanup via direct layout/draw calls, leaving hardware composition and vendor IME timing unverified (2e73a06a; 39e55b4b)
+- **D31** — Isolated bash/ash instrumentation (`ShellTitleTest`, now `android/tests`) and host zsh PTY checks verify PWD restoration, command titles, history fallback, and reload safety, leaving custom prompt frameworks, live upgrades, and other device configurations uncovered (b04ebd4e, 9f9ba8d7; 39e55b4b)
+- **D32** — RecyclerView 1.2.1 stays a direct catalog dependency (upgrades must update static notices) with three shell-free title-list tests for identity, 50-tab viewport, and focus (real IME/vendor behavior unproven; owned by `android/build` and `android/tests`) (34348eda; 39e55b4b)
+
 ## Active (full detail)
 
 ### D1: Kernels cross JNI as handles into a table
@@ -34,19 +51,6 @@
 - **Tradeoffs**: Every call takes the table lock briefly.
 - **Watch out**: Drop the table guard before dropping the last `Arc`, since `Machine`'s drop kills processes and joins threads: bind a removed or replaced entry and drop it after the statement, because a temporary is dropped while the statement's guard is still held.
 - **Source**: rounds 07 (`07-m5`), 99 (`99-choose-rootfs`); 7f79758
-
-### D2: Debug and release APKs use distinct optimized native profiles
-- **What**: cargo-ndk builds arm64-v8a with the release profile plus test-hooks and borrow-check for debug APKs and the dedicated android-release profile for release APKs (android/build D5).
-- **Why**: The instrumentation tests need the hooks to simulate kernel and engine bugs inside the app process, and the release APK must not contain them (checked in the `.so`); the BKL borrow check, once debug-only, was made a feature so release builds can run it too.
-- **Tradeoffs**: Rust debug assertions never run on Android.
-- **Source**: rounds 07 (`07-m5`), 21 (`21-robustness-finish`), 89 (`89-release-borrow-check`); 7b3e57c5
-
-### D3: The APK is arm64 only and ships its native library uncompressed
-- **What**: minSdk 30 (cargo-ndk `--platform 30`), target 37, `arm64-v8a` only; `useLegacyPackaging = false` so the 16 KB-aligned library maps straight from the APK; the rootfs asset is named `rootfs.tgz`.
-- **Why**: Only aarch64 hosts are supported (Tier 1 translates aarch64 to aarch64); the user dropped Android 10 so the app calls API 30's platform APIs (`ParcelFileDescriptor.wrap`, `ApplicationExitInfo`) directly; NDK 29 aligns `LOAD` segments to 16 KB, so uncompressed storage works on 16 KB-page devices; AAPT would unpack an asset ending in `.gz`.
-- **Tradeoffs**: Android 10 devices can no longer install the app.
-- **Watch out**: The library links against API 30 bionic, so a libc function newer than API 30 still fails at dlopen on devices below its level.
-- **Source**: round 07 (`07-m5`); 0709982
 
 ### D4: Released sources are generated by a script, without running downloaded build code
 - **What**: `scripts/release-sources` bundles Appine at clean HEAD, vendored crates, aports/checksum-verified upstream sources for GPL origins found in the rootfs and bundled APK metadata, and libghostty-vt’s published source/dependency tarballs without evaluating downloaded build code.
@@ -69,27 +73,6 @@
 - **Watch out**: A global cache that ever held a package archive (such as `~/.cache/zig`) makes Zig 0.17 panic with "reached unreachable code", so the build must keep its own; an upgrade can change the C API silently, need a newer Zig or add linked components the notices miss (list libghostty-vt.a's objects again); build.rs reruns only on vt.c, the source's `LIB_VERSION` and `build.zig.zon` and its environment variables, not when pkg/wuffs's `.zon` changes; the notices test now expects libghostty-vt and translate-c titles, while shared app state or stale emulator stores can still break login tests.
 - **Source**: 394aecf, b38d29c, 8811c32, 172be7c; a1367531; 20137e4c; d053be24; 39e55b4b
 
-### D8: Instrumentation tests cover oversized downloads, homeless accounts and repeated reads of saved tabs
-- **What**: `downloadsAreVerified` expects a download one byte past its pinned length to fail with no partial file, `documentsWithoutAHomeDirectory` checks the roots and refused writes for a home of `/` and a missing home, and the saved-tabs test (its tabs built without names since 7c35183) reads the same tabs twice before the kernel is up and expects one content-named transcript per saved tab.
-- **Why**: The fetch cap, homes of `/` and keeping the killed-run marker had no device-side coverage, and the saved-tabs test still expected the marker to be deleted.
-- **Tradeoffs**: Only the `file:` URL path is exercised, not HTTP resumption, and loading an index written by a version with tab names is untested.
-- **Watch out**: The saved-tabs test assumes transcripts are the only `.txt` files in `files/tabs`, and each home case needs its own login setting so the provider's cached home is not reused.
-- **Source**: 544418f, 711b034, d5dbe29; 7c35183
-
-### D9: `Native` and the JNI bridge follow a kernel's life
-- **What**: `Native` runs init, the store, browsing, start, boot, `setRoutes`, the console functions, the poll's calls in poll order, `trimMemory`, shutdown and stop; hosts/android's JNI functions follow Native.kt's order with `MACHINES` opening the kernel section and the string and error helpers last; `MachineTest` is grouped by app flow without pinning JUnit's method order.
-- **Why**: The user wanted each file to read in the order its code runs; Native's functions and MachineTest's tests followed neither a kernel's life nor the app's flow, and the bridge's helpers sat above the JNI functions using them.
-- **Tradeoffs**: git blame on the moved lines points at these commits unless read with -M or an ignore-revs file; MachineTest's diff is large for no change in behaviour.
-- **Watch out**: A function added to Native.kt goes to the same place in the Rust bridge.
-- **Source**: a546fea, 55d75ac
-
-### D10: Kotlin compiler and lint warnings fail the build
-- **What**: `kotlin.compilerOptions.allWarningsAsErrors` covers every compilation, local builds included, and `lint.warningsAsErrors` is on with GradleDependency, AndroidGradlePluginVersion, OldTargetApi, ExpiringTargetSdkVersion and OutdatedLibrary informational, since they follow data outside the repository; no formatter, detekt or extraWarnings.
-- **Why**: CI ran lintDebug without failing on its warnings and Kotlin warnings were ignored, while the Rust code is held to clippy `-D warnings`.
-- **Tradeoffs**: A warning stops local builds too, unlike local cargo builds; outdated dependencies and target SDK deadlines fail nothing and must be noticed in the report; formatting stays manual.
-- **Watch out**: Upgrading compileSdk, AGP, Kotlin or a library can surface new deprecations or checks as failures; Play SDK Index errors from outside data can still fail lint; an informational issue ID that a later AGP drops would be reported as unknown, now an error.
-- **Source**: 4c1a3ce
-
 ### D12: Builds package independent offline Alpine bundles
 - **What**: The pinned input inventory selects fetched artifacts (android/build), requiring four bash, seven procps and two bubblewrap/libcap2 assets in independent bundles, with shared ncurses payloads duplicated but attribution counted once and package metadata still driving release-source discovery.
 - **Why**: Each offline login bundle needs complete dependencies independent of the selected shell or other installers.
@@ -103,35 +86,6 @@
 - **Tradeoffs**: Kernel state a panic left half done (a poisoned lock, a held BKL) is not repaired, so later calls on that machine may fail or wait; Kotlin callers of non-throwing functions see an ordinary failure (an ended console or process) rather than a kernel-bug report.
 - **Watch out**: A new JNI function written without `guarded!` aborts again on a panic, and `return` inside a guarded body returns only from the body.
 - **Source**: be72f31
-
-### D16: Every kernel the app starts reports guest crashes in its kernel log
-- **What**: `Native.start` passes `exception_trace: true` (kernel/process D35) for every kernel start (app start, restart, distribution change), so unhandled guest faults are reported in the kernel log (kernel/signal D23) that copied bug reports carry, and `MachineTest.guestCrashesReachTheKernelLog` runs a one-instruction `udf #0` ELF and finds its report in dmesg.
-- **Why**: On Appine a guest crash is often Appine's own bug, as the shared-translation SIGILL was.
-- **Tradeoffs**: There is no switch in the app; a user who wants the reports off writes the sysctl after each start.
-- **Watch out**: The instrumentation test expects the mapping `undefined[400000+1000]`, which changes if the `elf()` helper's layout does.
-- **Source**: 7b7f73b
-
-### D19: An instrumentation test checks the login shells' prompt marks
-- **What**: Instrumentation retains explicit ash B/continuation marks, checks customized and nested ash, tests a fresh Alpine bash import separately, and strips terminal controls for textual login assertions.
-- **Why**: The marks come from guest shell code the build never runs (android/setup D20), so a regression in profile.sh would only show as a terminal that quietly stops closing at the prompt.
-- **Tradeoffs**: Tests still share app state in places, and Debian integration and lock cases need separate coverage.
-- **Watch out**: Raw-byte prompt assertions must follow profile changes, and isolated instrumentation still needs the app stopped to release its store lock.
-- **Source**: 6c5f921, 2b04a43; a809c5a8 (test refinement); 7aa817af; 20137e4c; d053be24; 39e55b4b
-
-### D20: The app's build script stays one file, configuration first, with a libraries-only version catalog
-- **What**: The app keeps one build.gradle.kts with configuration before task classes and a libraries-only version catalog, uses newestFetched for packaged inputs and no longer registers NoticesTask or generated notice assets.
-- **Why**: The script had grown to about 600 lines with its configuration split around the task classes, and the library versions were written inline.
-- **Tradeoffs**: The script is still long, its task classes stay untestable outside a build, and AGP's version sits apart from the catalog.
-- **Watch out**: Task classes must not capture script-level members, and static notice maintenance now replaces build-time discovery (D24).
-- **Source**: ef7a803; bd580227; d053be24; 39e55b4b
-
-### D23: JNI exposes one guarded guest-CPU aggregate for the screen-off policy
-
-- **What**: `Native.guestCpuTime` uses the handle table and panic guard, returns -1 when unavailable, and has coverage for both tiers, live/exited/pooled threads, idle/stopped handles and preference/grace behavior.
-- **Why**: The service needs safe guest-only activity accounting.
-- **Tradeoffs**: The aggregate does not identify workloads, and failures conservatively preserve wakefulness.
-- **Watch out**: Tests ran on an API 34 emulator rather than physical hardware or a 16 KB-page image.
-- **Source**: 1e5de64e; 20137e4c; d053be24; 39e55b4b
 
 ### D24: Notices are checked-in catalog and HTML assets with isolated reader tests
 
@@ -157,14 +111,6 @@
 - **Watch out**: API 34 emulator results do not cover real biometrics, vendor windows, persisted picker grants or 16 KB-page devices.
 - **Source**: d0ddf170, f61072f3; d053be24; 39e55b4b
 
-### D27: Terminal input tests use real encoding and dialogs without a shell
-
-- **What**: TerminalInputTest uses an isolated rootfs, a shell-free session and capturing host to exercise immediate delivery, no replay, composition/Enter, confirmation, bracketed paste, unsafe terminators and optional trailing-newline removal.
-- **Why**: The real input connection and delayed confirmation callbacks lacked regression coverage.
-- **Tradeoffs**: Instrumentation needs Android and a rootfs, uses reflection to supply the terminal and can capture themed-dialog screenshots.
-- **Watch out**: API 34 with 4 KB pages does not establish real keyboard UI, physical-device or 16 KB-page behavior.
-- **Source**: 6f5be4da; d053be24; 39e55b4b
-
 ### D28: Diagnostics initialize at application startup and share only scoped archives
 
 - **What**: MainApplication installs Diagnostics and a non-exported FileProvider exposes only the share directory through read-only grants, with tests for retention, contents, ownership, confinement and privacy.
@@ -172,38 +118,6 @@
 - **Tradeoffs**: Capture adds startup work and cache use without new permissions or dependencies.
 - **Watch out**: API 30 trace attachments, real native-crash/ANR capture and 16 KB-page devices remain unverified.
 - **Source**: c7309c0c; d053be24; 39e55b4b
-
-### D29: File-import tests exercise native storage and literal shell arguments
-
-- **What**: Seven TerminalFilesTest cases cover binary/empty copies, collisions, name sanitization, home restrictions, read/close failures, literal shell arguments and locked-picker retention across recreation.
-- **Why**: Import behavior needs real store and activity-lifecycle coverage rather than mock-only tests.
-- **Tradeoffs**: Tests require arm64 Android and the bundled rootfs and do not drive cloud providers.
-- **Watch out**: API 34 emulator coverage leaves vendor pickers, physical devices and process interruption unverified.
-- **Source**: 165b5f99; d053be24; 39e55b4b
-
-### D30: View-pixel tests cover resize-preview release and cleanup
-
-- **What**: Seven isolated instrumentation cases exercise queued full frames, subrow layouts, partial controls, quiet output, timeout, complete repaint and detach cleanup with controlled native output.
-- **Why**: Compilation and native-only tests missed view-level preview cancellation.
-- **Tradeoffs**: Tests need Android and bundled rootfs but avoid shell and IME scheduling.
-- **Watch out**: Direct layout/draw calls do not establish hardware composition or vendor IME timing; these pre-split tests now belong to android/tests.
-- **Source**: 2e73a06a; 39e55b4b
-
-### D31: Shell-title tests exercise real shell hooks and restoration
-
-- **What**: Isolated bash/ash tests cover PWD restoration, program titles and Unicode/control paths, with ShellTitleTest also covering external/compound commands, pipelines, history fallback, exit status and repeated hook loading.
-- **Why**: Command-title reporting must preserve directory titles and shell behavior.
-- **Tradeoffs**: Instrumentation requires Android while zsh uses host PTY checks.
-- **Watch out**: Custom prompt frameworks, live upgrades and other device configurations remain uncovered; pre-split history stays here although tests now belong to android/tests.
-- **Source**: b04ebd4e, 9f9ba8d7; 39e55b4b
-
-### D32: The title list declares its existing RecyclerView dependency and tests
-
-- **What**: RecyclerView 1.2.1 is a direct catalog/app dependency matching resolved classpaths and notices, with three shell-free cases for row identity after removal, a 50-tab viewport and focus across list lifecycle.
-- **Why**: Direct RecyclerView use needs an explicit dependency and view-level regression coverage.
-- **Tradeoffs**: The existing version is retained and tests require Android instrumentation.
-- **Watch out**: Real IME/vendor behavior remains unproven and upgrades must update static notices; build and test ownership now belongs to android/build and android/tests.
-- **Source**: 34348eda; 39e55b4b
 
 ### D33: A private app-UID `:venus` service probes both BLOB sharing directions
 
@@ -252,6 +166,14 @@
 - **Tradeoffs**: The bridge maintains an explicit errno mapping.
 - **Watch out**: ENOTDIR follows the missing-path mapping.
 - **Source**: 9b179de1
+
+### D40: Stack-scoped thread-local store sessions batch JNI reads and writes
+
+- **What**: `Native.withStore(store, LongConsumer)`, `Native.storeWriteFile`, and `Native.storeReadFile` share one short-lived `Store` via a thread-local `STORE_SESSIONS` map with an RAII `StoreSessionGuard`, an `in_use` re-entrancy guard returning `EBADF`, and shared `read_file_result` error mapping.
+- **Why**: Kotlin setup runs conditional read-then-write steps across many files and needs one shared `!Sync` `Store` across JNI calls without leaking connections or sharing handles across threads.
+- **Tradeoffs**: Session handles remain valid only synchronously on the callback thread and add three JNI entry points.
+- **Watch out**: Passing a session handle across threads or beyond `withStore` fails with `EBADF`, and `withStore` relies on preserving pending Java exceptions via `env.exception_check()` like `browseImport`.
+- **Source**: 641769ab
 
 ## Superseded
 

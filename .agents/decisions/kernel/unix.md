@@ -2,7 +2,7 @@
 
 > Snapshot of current consensus. Evolution: `git log --grep="MODULE: kernel/unix"`
 >
-> Last distilled: 2026-11-26 (HEAD = e8ac8ebf). D1–D3 were seeded by hand from the retired design doc
+> Last distilled: 2026-11-27 (HEAD = 2f321b12). D1–D3 were seeded by hand from the retired design doc
 > §10 and the round records in `docs/rounds/`, so their sources cite rounds; later entries cite
 > commits.
 
@@ -121,3 +121,15 @@
 - **Tradeoffs**: Connected streams expose a fourth wake object (`SenderState`) in `UnixSocket::wake_objects`, and single `SOCK_STREAM` writes exceeding `stream_chunk_limit` split into multiple skb-sized `Packet`s.
 - **Watch out**: Programs assuming payload-only `SOCK_STREAM` caps or receiver-side `SO_RCVBUF` throttling now observe Linux's truesize and sender-side `SO_SNDBUF` limits.
 - **Source**: bedd532e
+
+### D17: AF_UNIX receives scatter directly from queued packet slices in one copy pass
+
+- **What**: Use `Channel::read_stream_to` and a cursor-advancing `scatter_partial` so `SOCK_STREAM`, `SOCK_DGRAM`, and `SOCK_SEQPACKET` receives copy once directly from queued packet slices into guest iovecs while preserving `SO_PASSCRED` boundaries, `SCM_RIGHTS` detachment/GC, `MSG_PEEK`/`MSG_TRUNC`/`MSG_WAITALL`, `EFAULT`/`FUSE_RETRY` rollback, and `SenderState` truesize accounting.
+- **Why**: Peeking into a freshly allocated `Vec<u8>` and then consuming via a second buffer copy slowed 64-byte `SOCK_STREAM` traffic by 33%.
+- **Tradeoffs**: Holds the `Channel` `RefCell` borrow across guest user-memory copies in `recv_stream` and `recv_packet`, relying on `FUSE_RETRY` unwinding before dropping the BKL.
+- **Watch out**: Any future callback invoked during `read_stream_to` must only copy to guest memory and never re-enter the same `Channel` `RefCell`.
+- **Source**: b38371ff
+
+## Superseded
+
+- ~~Preview-then-consume double-copy receive flow (D3 in part, 4309ef58; D9 receive copy flow in part)~~ → replaced by **D17** in b38371ff (2026-11-27)

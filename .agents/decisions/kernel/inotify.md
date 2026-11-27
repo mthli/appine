@@ -2,7 +2,7 @@
 
 > Snapshot of current consensus. Evolution: `git log --grep="MODULE: kernel/inotify"`
 >
-> Last distilled: 2026-11-26 (HEAD = e8ac8ebf)
+> Last distilled: 2026-11-27 (HEAD = 2f321b12)
 >
 > inotify decisions made before kernel/inotify was split from kernel/vfs keep their `kernel/vfs` tags and live in `.agents/decisions/kernel/vfs.md`: D13, D46 and D51.
 
@@ -39,7 +39,16 @@
 - **Watch out**: Every future path that opens an nsfs file description or creates an nsfs mount must call `pin_ns` or clone an existing `Mount::ns_pin`.
 - **Source**: b98eb140
 
+### D5: Open records use a recycled slab with intrusive per-inode lists and idle-registry fast paths
+
+- **What**: Store `OpenRecord` entries in a freelist-recycled `Vec` slab linked by intrusive per-inode doubly-linked lists in an `InodeHasher` `HashMap`, represent `Opened` as `(Weak<RefCell<Registry>>, u32)`, skip borrowing `Registry` in `file_io_event` when idle, and deduplicate watch cleanup in `Watches::retain_watchers`.
+- **Why**: Allocating `Rc<OpenRecord>` and mutating `Registry::opened: BTreeMap` on every `open`/`close` slowed `openbench` by 6–27% even with zero watches.
+- **Tradeoffs**: Replaces `Rc` and `BTreeMap` with manual slab indices and doubly-linked list pointers.
+- **Watch out**: Slot-index or prev/next pointer bugs during clone, drop, or unlink could corrupt the freelist or drop late `IN_CLOSE_*` events.
+- **Source**: b38371ff
+
 ## Superseded
 
 - ~~Relying on successful open replay to move shared mappings~~ → replaced by **D3** in f495f2cc (2026-11-24)
 - ~~Finding unlink and rename holders by scanning installed open files~~ → replaced by **D3** in 93a9b204 (2026-11-24)
+- ~~Per-open `Rc<OpenRecord>` and `BTreeMap` open-record tracking (D3 in part, 93a9b204)~~ → replaced by **D5** in b38371ff (2026-11-27)

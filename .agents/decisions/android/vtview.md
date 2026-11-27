@@ -2,7 +2,7 @@
 
 > Snapshot of current consensus. Evolution: `git log --grep="MODULE: android/vtview"`
 >
-> Last distilled: 2026-11-26 (HEAD = 3ad68857)
+> Last distilled: 2026-11-27 (HEAD = 2f321b12)
 >
 > Decisions on the terminal view made before android/vtview was split from android/terminal keep their `android/terminal` tags and live in `.agents/decisions/android/terminal.md`: D5, D7, D9, D16, D17, D25, D30–D32, D34, D36, D37, D40, D41, D43 and D46–D48.
 
@@ -16,11 +16,11 @@
 - **Source**: d42013d (files since added by 49e8b08, D3); 9015b244, 81f60bef; d053be24; 39e55b4b; 02dfe2ec
 
 ### D2: The view drops its image bitmaps while its window is hidden
-- **What**: `onWindowVisibilityChanged` calls `dropImages` when the window is not visible, and the next frame finds the placements' pictures missing, copies them from libghostty-vt and asks for a full frame, while the backing bitmap keeps showing the rows already painted.
+- **What**: `onWindowVisibilityChanged` calls `dropImages` when the window is not visible, and the next frame finds the placements' pictures missing, copies them from libghostty-vt and asks for a full frame, while `dropImages` now discards row display lists (D13).
 - **Why**: The view's copies of the shown tab's images stayed in memory while the app was in the background, where nothing draws them and libghostty-vt still holds the pixels.
 - **Tradeoffs**: Coming back from Settings, another app or the background copies every placed image again (one memcpy each) and repaints the screen once.
 - **Watch out**: libghostty-vt's own images are cut only under memory pressure before Android 14 (android/vt D3), so on newer versions they stay until their tab closes.
-- **Source**: e9caf75
+- **Source**: e9caf75; e98ff62c
 
 ### D3: Frames, the screen mirror, drawing and images are classes of their own beside `VtView`
 - **What**: `VtFrame` (an inline class over the frame buffer with named header fields, placements and row copying, named by vt.c as the frame's reader), `VtScreen` (the cells, selected columns, default colours and cursor), `VtRenderer` (the paints, cell metrics, backing bitmap and all drawing, with the cell constants) and `VtImages` (the placements and bitmaps) own their state, while `VtView` keeps the interaction code (selection, gestures, scrolling), reads cols, rows and cell sizes through getters and writes the cursor and default colours from the frame header into `VtScreen`.
@@ -79,11 +79,11 @@
 
 ### D10: Height shrink briefly preserves the last painted frame
 
-- **What**: Same-width row shrink at the bottom without selection/search preserves a clipped painted bitmap until settled output or 200 ms, retaining subrow previews, requesting full rows after skipped frames and clearing on interaction or lifecycle changes.
+- **What**: Same-width row shrink at the bottom without selection/search preserves a clipped preview (hardware `RenderNode` or software bitmap fallback under D13) until settled output or 200 ms, retaining subrow previews, requesting full rows after skipped frames and clearing on interaction or lifecycle changes.
 - **Why**: Old rows can shift visibly before a CLI redraw arrives.
-- **Tradeoffs**: One temporary bitmap delays resized display briefly, while width changes, growth and interactive history render immediately.
+- **Tradeoffs**: A temporary preview delays resized display briefly, while width changes, growth and interactive history render immediately.
 - **Watch out**: Track painted state independently of full-frame requests; slow redraws can exceed the deadline and vendor IME interruption coverage remains limited.
-- **Source**: 2e73a06a; 39e55b4b
+- **Source**: 2e73a06a; 39e55b4b; e98ff62c
 
 ### D11: The system selection menu inherits the terminal night override
 
@@ -101,6 +101,15 @@
 - **Watch out**: Handle window detach as well as tab switches.
 - **Source**: 6f2776f3, 3a90a0ef, ae1e05e0
 
+### D13: Height-shrink previews, image drops, and in-place repaints target `RenderNode` display lists
+
+- **What**: `VtView` encapsulates height-shrink snapshots in `ResizePreview` (`Hardware(RenderNode)` referencing prior row nodes when hardware-accelerated or `Software(Bitmap)` otherwise, guarding `c.isHardwareAccelerated` on draw), discards row display lists in `dropImages()` on tab switch and window hide, and invalidates cached rows in place via `renderer.invalidateRows()` on default-color changes and `images.take()` arrivals.
+- **Why**: Backing-bitmap assumptions in height-shrink previews, window-hide image drops, and late-image or color repaints would break on software canvases or retain stale image bitmaps under `RenderNode` rendering.
+- **Tradeoffs**: Adds a dual-mode `ResizePreview` wrapper for off-window software tests and allocates fresh row nodes on `resize()` so an active hardware preview's child references remain valid until cleared.
+- **Watch out**: Hardware height-shrink previews during real IME inset animations and mixed hardware/software draw transitions still need verification on a device or emulator.
+- **Source**: e98ff62c
+
 ## Superseded
 - ~~D1 ownership of frame encoding, mirrors, drawing, images, glyphs and fonts~~ → replaced by **D1** in 9015b244 (2026-11-14)
 - ~~D1 ownership of touch/mouse gestures, scrolling, selection, links and prompt taps (d42013d, 9015b244)~~ → replaced by **D1** and android/vtgestures **D1** in 02dfe2ec (2026-11-22)
+- ~~Backing-bitmap retention on hidden-window image drop (D2 in e9caf75) and bitmap-only height-shrink snapshot (D10 in 2e73a06a)~~ → replaced by **D13** in e98ff62c (2026-11-27)

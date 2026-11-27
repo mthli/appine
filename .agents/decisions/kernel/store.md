@@ -2,7 +2,7 @@
 
 > Snapshot of current consensus. Evolution: `git log --grep="MODULE: kernel/store"`
 >
-> Last distilled: 2026-11-26 (HEAD = 3ad68857). D1–D9 were seeded by hand from the retired design doc
+> Last distilled: 2026-11-27 (HEAD = 2f321b12). D1–D9 were seeded by hand from the retired design doc
 > §8.1 and the round records in `docs/rounds/`, so their sources cite rounds; later entries cite
 > commits.
 
@@ -170,6 +170,30 @@
 - **Watch out**: Hold it until the content registry update completes.
 - **Source**: 9163f493, 4768d932, 9951951a
 
+### D23: Sole-user `mapping_object`, `remove_object`, and unlink/atime updates take cached fast paths
+
+- **What**: Serve sole-joined-user `mapping_object` from `Store::Cache` with post-flock `Commits::users_state` revalidation and `changed_backings`-gated reconciliation, gate `remove_object`'s `O_PATH` pin on `mm::try_enter_fast_unlink()`, update queued `Fill::Row` atime in place while skipping no-op `UPDATE`s, consolidate `remove_link` with `remove_checked` and `UPDATE ... RETURNING nlink`, and drop the duplicate `lookup` in `add_dentry`.
+- **Why**: Every regular-file `mmap`, `unlink`, `new_object`, and reaped deletion previously paid avoidable SQLite transactions, multi-table JOINs, cache evictions, or host pin syscalls.
+- **Tradeoffs**: Tracking `changed_backings` degrades to full reconciliation on rollback or cap, and sole-user `mmap` still keeps an `openat`+`flock` pin for cross-connection provider safety.
+- **Watch out**: Missing a shared-backing mutation in `changed_backings` or skipping invalidation when `!defers()` could serve a stale object after a DocumentsProvider edit.
+- **Source**: b38371ff
+
+### D24: Store caches regular-file host stats and rotates two-generation metadata tables
+
+- **What**: Cache regular-file host stats in `Cache` (with relatime-matching invalidation and `held_sizes` for immutable held files), drop `Meta::lock.read()` before uncached `fstatat` in `Reader::stat`, and split `Cache` into two 65,536-entry positive generations plus two 8,192-entry negative-dentry generations whose evicted maps drop outside `Meta::lock.write()`.
+- **Why**: Regular-file stats called host `fstatat` under `Meta::lock.read()` on every call, stalling BKL writers, and exceeding 131,072 entries wiped the entire cache under `Meta::lock.write()`.
+- **Tradeoffs**: Lookups probe up to two maps (hot then cold), and `Reader::stat` misses after `object_modified` do not repopulate `Cache` until a BKL `Store::stat` runs.
+- **Watch out**: Any new host-object mutation bypassing `object_modified` or `touch_ino` will serve stale cached size, mtime, or ctime until invalidated.
+- **Source**: cb0f3059
+
+### D25: Short-lived host store wrappers skip the reaper thread and support batched sessions
+
+- **What**: Add `Store::open_short` (reusing inline reaping and SQLite auto-checkpointing without spawning `objects-reaper`), switch `write_file`/`read_file`/`browse`/`browse_changing` to it, and add `with_store`, `write_file_in` (per-write `store.commit()` without extra WAL `fdatasync`s), and `read_file_in`.
+- **Why**: Each short-lived host open previously spawned and joined a reaper OS thread, and batched startup writes needed one exclusive open and WAL sync with per-step failure isolation.
+- **Tradeoffs**: Short-lived host connections that delete objects reap them inline after WAL sync and rely on SQLite's 1,000-page auto-checkpoint if their WAL grows.
+- **Watch out**: Exclusive recovery still runs `sync_metadata()` once per `with_store` session per D11, and callers must drop the store before `Native.start` so the kernel obtains an exclusive boot open.
+- **Source**: 641769ab
+
 ## Superseded
 
 - ~~Leaving mapped readers on the old backing object after a provider write~~ → replaced by **D17** in 523ae8a9 (2026-11-24)
@@ -178,3 +202,4 @@
 - ~~Unlinking boot-cleanup objects inside the transaction after syncing only the preceding WAL~~ → replaced by **D11** in be442caa (2026-11-26)
 - ~~Taking the shared lock first and syncing the new WAL only when objects await deletion~~ → replaced by **D11** in 2173fed5 (2026-11-26)
 - ~~Mapping the commit header through the live store lock descriptor and locking only after connecting during create~~ → replaced by **D11** in 66bcd1b0 (2026-11-26)
+- ~~Unconditional transactional `mapping_object` (D17 in part, f495f2cc) and always-pinned `remove_object` (D22 in part, 9163f493, 4768d932)~~ → replaced by **D23** in b38371ff (2026-11-27)

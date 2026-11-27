@@ -2,7 +2,7 @@
 
 > Snapshot of current consensus. Evolution: `git log --grep="MODULE: android/vt"`
 >
-> Last distilled: 2026-11-26 (HEAD = 3ad68857)
+> Last distilled: 2026-11-27 (HEAD = 2f321b12)
 >
 > Decisions on the tabs' sessions made before android/vt was split from android/terminal keep their `android/terminal` tags and live in `.agents/decisions/android/terminal.md`: D2, D5, D6, D8, D16, D17, D32, D33, D35–D39 and D42–D49.
 
@@ -92,6 +92,14 @@
 - **Tradeoffs**: Excess requests get an empty answer and opening a prompt cancels the waiting deadline.
 - **Watch out**: Observe native generation changes before accepting delayed callbacks.
 - **Source**: f3d226d5, 565f4a4e
+
+### D12: `VtSession.takeTranscript` runs on the service worker with `@Volatile lastTranscript`
+
+- **What**: `VtSession` replaces `transcriptText` with a worker-called `takeTranscript()` method and marks `lastTranscript` `@Volatile`, matching `resolvedLogin`, `takeSnapshot()`, and `savedSnapshot`.
+- **Why**: `VtNative.transcript` is mutex-protected and safe to invoke from the service worker just like `takeSnapshot()`, so transcript capture need not run on the main thread.
+- **Tradeoffs**: Main-thread callers no longer have a direct transcript property (none existed outside `TerminalService.saveTabs`).
+- **Watch out**: A session released on the main thread while a queued worker save runs sees `VtNative.transcript` return null and falls back to `lastTranscript`, matching `takeSnapshot()`.
+- **Source**: 2f321b12
 
 ## Superseded
 - ~~Background output at an ash prompt ending input like Enter (a809c5a8)~~ → replaced by **D6** in daab4446 (2026-11-13)

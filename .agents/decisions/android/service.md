@@ -2,7 +2,7 @@
 
 > Snapshot of current consensus. Evolution: `git log --grep="MODULE: android/service"`
 >
-> Last distilled: 2026-11-26 (HEAD = e8ac8ebf). D1–D6 were seeded by hand from the retired design
+> Last distilled: 2026-11-27 (HEAD = 2f321b12). D1–D6 were seeded by hand from the retired design
 > doc §11.2 and the round records in `docs/rounds/`, so their sources cite rounds; later entries
 > cite commits.
 
@@ -192,6 +192,30 @@
 - **Tradeoffs**: Users whose `/etc/appine/browser` write failed see browser-launch errors in guest tools rather than a startup dialog and must inspect diagnostic logs.
 - **Watch out**: Non-`IOException` errors still close `BrowserBridge` and abort startup, and `Native.start` remains the fatal integrity check for a corrupt or unopenable store.
 - **Source**: 12ac97cf, f7d164db
+
+### D38: `ServiceLifecycle` centralizes main-thread lifecycle flags and post-destroy guards
+
+- **What**: `internal class ServiceLifecycle` (with top-level `StartedKernel` accepting `Closeable?`) owns lifecycle flags, `wantsWakeLock` (always `false` after `destroyed`), and `completeStart`/`completeTransition`/`finishExit`/`completeExit`, guarding `start`, `replace`, `restart`, `exitAll`, and late import progress against `destroyed` with JUnit 4 regression tests.
+- **Why**: `replace()` and `restart()` main-thread continuations lacked `destroyed` guards, risking wake-lock leaks via `start()` or uncaught `RejectedExecutionException` on the shut-down worker after `onDestroy()`.
+- **Tradeoffs**: Adds a small helper class and callback indirection in `TerminalService.kt` compared to inline early returns.
+- **Watch out**: Future lifecycle callbacks added to `TerminalService` must route through `ServiceLifecycle` or check `lifecycle.destroyed` to avoid reintroducing post-destroy wake-lock or executor bugs.
+- **Source**: 0160070e
+
+### D39: `startKernel` skips `ensureOpenRc` when `prepareStart` confirms OpenRC is already done
+
+- **What**: `TerminalService.startKernel` captures `StartPreparation.openRcDone` from `Rootfs.prepareStart` and skips calling `Rootfs.ensureOpenRc` when true while preserving `browserReady` handling and falling back to `ensureOpenRc` whenever the marker is absent or obstructed.
+- **Why**: Calling `Rootfs.ensureOpenRc` right after `Native.start` opened a second concurrent store connection on every normal Alpine cold start solely to check `/var/lib/appine/openrc-setup-done`.
+- **Tradeoffs**: Couples `startKernel`'s OpenRC fast-skip to `prepareStart`'s precheck immediately before `Native.start`.
+- **Watch out**: Relies on nothing deleting `/var/lib/appine/openrc-setup-done` between `prepareStart` and `Native.start`.
+- **Source**: 641769ab
+
+### D40: `saveTabs` captures transcripts on the worker and runs before `trimMemory` on memory pressure
+
+- **What**: `saveTabs()` captures only the live session list and `unshown` restored records (`s.tab == 0L`) on the main thread, calls `session.takeTranscript()` alongside `consoleCwd` and `snapshotOf` on `worker` in one pass, and `onTrimMemory()` enqueues `saveTabs()` before `trimMemory()`.
+- **Why**: Calling `VtSession.transcriptText` on the main thread synchronously decompressed cold scrollback pages under `Tab.term`, and running `trimMemory()` before `saveTabs()` re-inflated pages just queued for `compressAll()`.
+- **Tradeoffs**: A process kill while the worker queue is backed up leaves an in-flight transcript save unwritten, matching `cwd`, snapshots, and `Tabs.save`.
+- **Watch out**: Serialization latency on the service worker remains shared across save and trim operations.
+- **Source**: 2f321b12
 
 ## Superseded
 

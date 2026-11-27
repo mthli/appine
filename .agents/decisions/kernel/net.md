@@ -2,7 +2,7 @@
 
 > Snapshot of current consensus. Evolution: `git log --grep="MODULE: kernel/net"`
 >
-> Last distilled: 2026-11-26 (HEAD = e8ac8ebf). D1–D8 were seeded by hand from the retired design doc
+> Last distilled: 2026-11-27 (HEAD = 2f321b12). D1–D8 were seeded by hand from the retired design doc
 > §10 and the round records in `docs/rounds/`, so their sources cite rounds; later entries cite
 > commits.
 
@@ -119,6 +119,22 @@
 - **Tradeoffs**: Each TCP-MIB site must accept MPTCP explicitly, and multi-subflow MPTCP connections are approximated as one TCP connection per guest socket.
 - **Watch out**: `tcp_state()` relies on host `IPPROTO_TCP` `TCP_INFO` support on MPTCP sockets, and hosts without `IPPROTO_MPTCP` skip the live guest test path.
 - **Source**: 0bc5207a
+
+### D31: Connected-UDP sends evaluate `world()` lazily and fast-path `update_udp_peer` via cached `peer_map`
+
+- **What**: Evaluate `cx.kr().world()` lazily in `syscall::net::send`, skip `implicit_bind`/`ensure_bound` when already bound, and update `vconn` in place in `update_udp_peer` without a host `getpeername` when `peer_map` matches, `!ttl_set`, and `unique_udp_host_ip` holds (clearing `peer_map` on DNS stub connect or reconnect failure).
+- **Why**: Address-less sends on connected UDP sockets targeting a non-initial network namespace allocated `Vec<Rc<NetNs>>` via `world()` and executed a host `getpeername` syscall on every datagram.
+- **Tradeoffs**: Mixed-IP shared UDP ports and `ttl_set` (traceroute) sockets still take the host `getpeername` fallback.
+- **Watch out**: Any path rebinding a UDP host socket outside `connect` or `update_udp_peer` must clear `peer_map` to avoid keeping a stale cached peer endpoint.
+- **Source**: b38371ff
+
+### D32: Socket I/O reuses per-thread `NetScratch` with `RecvSink::Scatter` and direct hot-page `SOCK_STREAM` iovecs
+
+- **What**: Reuse a per-thread 256 KiB-capped `NetScratch` RAII buffer across `recv`, `sendto`, `sendmsg`, and `rw`, scatter inet receives directly into guest iovecs via `RecvSink::Scatter`, and bypass scratch copies on hot-page `SOCK_STREAM` transfers via `translate_iovecs` and `hal::net::{sendmsg,recvmsg}_iov` with no `RefCell` borrows held across waits.
+- **Why**: `syscall/net.rs` previously allocated and zero-filled up to 1 MiB per socket I/O call (even on nonblocking `EAGAIN`) and allocated a second `Message::data` buffer on every receive.
+- **Tradeoffs**: Retains up to 256 KiB per thread doing socket I/O, requires callers to read only overwritten `[..got]` bytes, and falls back to `NetScratch` for cold, CoW, FUSE, or >64-span stream transfers.
+- **Watch out**: Never cache translated host page pointers across `wait_host` or omit `need_addr` for `vconn`, UDP `seen`, or `Traffic::account` paths.
+- **Source**: 4dd64f02
 
 ## Superseded
 

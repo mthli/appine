@@ -2,7 +2,7 @@
 
 > Snapshot of current consensus. Evolution: `git log --grep="MODULE: kernel/pipe"`
 >
-> Last distilled: 2026-11-26 (HEAD = 3ad68857)
+> Last distilled: 2026-11-27 (HEAD = 2f321b12)
 >
 > Pipe and splice decisions made before kernel/pipe was split from kernel/vfs keep their `kernel/vfs` tags and live in `.agents/decisions/kernel/vfs.md`: D31 and D54.
 
@@ -38,6 +38,14 @@
 - **Tradeoffs**: Each retained source has a snapshot and weak watch.
 - **Watch out**: Reclaim that discards in-place data must expire the watch.
 - **Source**: 4905fcba, ab417943, 6eb822d7, bb31dbda
+
+### D5: Pipe writes fast-path small buffers, batch arrival notifications, and initialize transfer scratch lazily
+
+- **What**: Use a 256-byte stack buffer in `pipe_write_user` for writes `<= 256` bytes, flush `pipe_arrivals` once per contiguous write burst before blocking or returning, and wrap `Pipe::transfer`'s 4 KiB scratch buffer in `LazyCell`.
+- **Why**: `pipe_write_user` previously zeroed 4 KiB on every write and updated timestamps and wakeups on every chunk, while `Pipe::transfer` zeroed 4 KiB even without `vmsplice` slots.
+- **Tradeoffs**: Adds slight branching between small (`<= 256` B) and page-sized pipe writes.
+- **Watch out**: Any early return from `pipe_write_user` after writing chunks must still flush pending `pipe_arrivals` so timestamps and edge wakeups are not lost.
+- **Source**: b38371ff
 
 ## Superseded
 

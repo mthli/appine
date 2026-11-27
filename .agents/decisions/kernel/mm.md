@@ -2,7 +2,7 @@
 
 > Snapshot of current consensus. Evolution: `git log --grep="MODULE: kernel/mm"`
 >
-> Last distilled: 2026-11-26 (HEAD = e8ac8ebf). D1–D17 were seeded by hand from the retired design
+> Last distilled: 2026-11-27 (HEAD = 2f321b12). D1–D17 were seeded by hand from the retired design
 > doc §5 and the round records in `docs/rounds/`, so their sources cite rounds; later entries cite
 > commits.
 
@@ -234,6 +234,14 @@
 - **Watch out**: Every future VMA insertion path must enforce `end <= 1 << VA_BITS` so no untranslatable VMA enters the 48-bit soft-MMU.
 - **Source**: 7e2143cf, ee941aed
 
+### D62: Batched `tmpfs` faults, in-place `FilePages` `mprotect`, and pagemap-backed `probe_writes`/`MADV_DONTNEED` fast paths
+
+- **What**: Batch `tmpfs` faults via `Mm::fault_range` and `FilePages::admit`, restrict tracked-file `mprotect` PTEs in place without setting `dirty` on upgrades, start eager writable private anonymous VMAs writable via `Vma::probe_writes`/`finish_write_probe`/`was_written` and keep soft PTEs intact (expiring `PageWatch`es) in `discard_with_pagemap` on pagemap-readable hosts, and skip `reconcile_mapping` when `MappingObject` indicates it is unnecessary.
+- **Why**: Single-page `tmpfs` faults, unconditional lazy `anon_vma` first-write traps, whole-VMA `FilePages` unmaps on `mprotect`, and unconditional private anonymous `MADV_DONTNEED` soft-PTE zapping and shootdowns regressed memory-heavy and multi-threaded workloads.
+- **Tradeoffs**: Splits behavior across pagemap-readable (Linux) and pagemap-denied (Android) hosts and requires resolving `probe_writes` before every VMA split, merge, fork, remap, `mprotect`, or discard.
+- **Watch out**: Any new VMA mutation that reads `written` directly instead of `was_written()` or skips `finish_write_probe` can misclassify an eagerly written anonymous VMA.
+- **Source**: b38371ff
+
 ## Superseded
 
 - ~~Adjacent VMAs joined only for display in maps and in fork's commit estimate (D7 in part, rounds 17, 18)~~ → replaced by **D22** in e03c0cc (2026-11-07)
@@ -254,3 +262,4 @@
 - ~~Approximating anonymous VMA joining without anonymous page offsets~~ → replaced by **D22** in 9d0ad1b6 (2026-11-26)
 - ~~Expiring page watches alone when truncation or FUSE invalidation unmap fails (D59 in part, f2d15cfd)~~ → replaced by **D59** in e9761fd4 (2026-11-26)
 - ~~Always creating a fresh anonymous remnant on `MREMAP_DONTUNMAP` (D22 in part, 9d0ad1b6)~~ → replaced by **D60** in d747205b (2026-11-26)
+- ~~Unconditional write-trapping for lazy `anon_vma`, single-page `tmpfs` faults, whole-VMA `FilePages` `mprotect` unmaps, and unconditional `MADV_DONTNEED` soft-PTE zapping (D22 and D54 in part, plus cross-module `kernel/mmu` D8 and `kernel/oom` D2; 9d0ad1b6, 11816722, 71790fde, e6e88b55)~~ → replaced by **D62** in b38371ff (2026-11-27)

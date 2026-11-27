@@ -2,7 +2,7 @@
 
 > Snapshot of current consensus. Evolution: `git log --grep="MODULE: kernel/hostmem"`
 >
-> Last distilled: 2026-11-26 (HEAD = 3ad68857)
+> Last distilled: 2026-11-27 (HEAD = 2f321b12)
 >
 > Decisions on kernel/hostmem made before it was split from kernel/mm keep their `kernel/mm` tags and live in `.agents/decisions/kernel/mm.md`: D2, D3, D12, D14, D15, D17, D30, D45, D47 and the host-backing parts of D4, D18, D20, D27, D33 and D38.
 
@@ -31,6 +31,14 @@
 - **Tradeoffs**: A linked file stays tracked until deletion.
 - **Watch out**: Pin and recheck the inode across concurrent unlink and registration.
 - **Source**: 9163f493, 4768d932, 9951951a
+
+### D4: Deferred `ForkFileView` returns and a `SeqCst` fast-unlink handshake guard `WRITABLY_SHARED`
+
+- **What**: Route released `ForkFileView` regions through `HostRegion::return_to` and `Unmapped::file_views` for off-BKL discard, and guard unpinned `remove_object` unlinks with `TRACKED`/`FAST_UNLINKS` `SeqCst` atomics (`try_enter_fast_unlink`/`FastUnlinkGuard`) while `writably_shared()` increments `TRACKED` and drains `FAST_UNLINKS` before `fstat(fd)`.
+- **Why**: Synchronous `ForkFileView` discards under the BKL would stall forks, and unconditional `openat(O_PATH)`, `fstat`, and `WRITABLY_SHARED` locking slowed every reaped file even when no writable shared mappings existed.
+- **Tradeoffs**: Adds a lightweight `SeqCst` atomic handshake to writable shared file registration and object reaping.
+- **Watch out**: Moving the `TRACKED` increment after `fstat(fd)` or removing the `FAST_UNLINKS` drain in `writably_shared()` would let an unpinned unlink race with host inode reuse.
+- **Source**: b38371ff
 
 ## Superseded
 

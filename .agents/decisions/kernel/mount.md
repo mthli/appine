@@ -2,7 +2,7 @@
 
 > Snapshot of current consensus. Evolution: `git log --grep="MODULE: kernel/mount"`
 >
-> Last distilled: 2026-11-26 (HEAD = 3ad68857)
+> Last distilled: 2026-11-27 (HEAD = 2f321b12)
 >
 > Mount decisions made before kernel/mount was split from kernel/vfs keep their `kernel/vfs` tags and live in `.agents/decisions/kernel/vfs.md`: D2, D4, D6–D8, D10, D30, D32, D35, D48, D52 and D53.
 
@@ -55,3 +55,11 @@
 - **Tradeoffs**: Indices and detached-root pins must follow attach and move operations.
 - **Watch out**: Retry collection when a holder is borrowed and resolve the target at the operation-specific point.
 - **Source**: 0e02d7cd, 2609ab43, 3a90a0ef, 515ecd7f, f6bb8899, c5be5c77
+
+### D7: `Mounts::alloc_dev` skips reserved device numbers and `ROOT_DEV`
+
+- **What**: Centralize dynamic filesystem device allocation in `Mounts::alloc_dev` starting at `FIRST_ALLOC_DEV = 0x30`, skipping `< 0x30` and `ROOT_DEV` (including wraparound from `u64::MAX`), and route `boot_tmpfs`, `add_mount_inner`, `mq_dev`, and `sys_dev` through it.
+- **Why**: Sequential `Mounts::next_dev` increments from `0x30` could collide with `ROOT_DEV` (`0x801`) after ~2,001 mounts and corrupt `sb_flags` and `sb_busy`.
+- **Tradeoffs**: Device numbers remain sequentially allocated without recycling freed IDs.
+- **Watch out**: Any new fixed device number at or above `0x30` must also be excluded in `Mounts::alloc_dev`.
+- **Source**: 0160070e

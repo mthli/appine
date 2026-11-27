@@ -2,7 +2,7 @@
 
 > Snapshot of current consensus. Evolution: `git log --grep="MODULE: kernel/vfs"`
 >
-> Last distilled: 2026-11-26 (HEAD = 3ad68857). D1–D14 were seeded by hand from the retired design
+> Last distilled: 2026-11-27 (HEAD = 2f321b12). D1–D14 were seeded by hand from the retired design
 > doc §8.2–§8.3 and §11.1 and the round records in `docs/rounds/`, so their sources cite rounds;
 > later entries cite commits.
 
@@ -51,14 +51,22 @@
 - **D57** — Create mode-0666 character node /dev/dri/renderD128 (226:128) only at GPU-enabled boot and keep its number aligned with kernel/procfs D42 (87c7d9db)
 - **D58** — write_file_owned sets new-file uid/gid while write_file passes 0/0, and callers creating user-owned files must provide existing parents or newly created directories will belong to root (0755) (125f3d00)
 
-## Active (full detail)
+> Full text of D2, D6, D12, D13, D22, D42, D43, D47, D49, D51, D53 and D56: `git show 1ea0c1ef9d686d7126bec2029fc928d4f6fdfc6b:.agents/decisions/kernel/vfs.md`
 
-### D2: One global mount table, with the mount namespace kept in the fs context
-- **What**: Mount records are stored globally by id and each records its namespace; a task's mount namespace lives in `FsContext` next to root, cwd and umask rather than in nsproxy.
-- **Why**: Mount ids are global anyway, and path resolution needed no change because copied mounts have their own ids. `CLONE_NEWNS` cannot be combined with `CLONE_FS`, unshare implies it and setns requires an unshared fs, so tasks sharing an fs are always in the same mount namespace; this also avoided building all of nsproxy first.
-- **Tradeoffs**: Unused namespaces, detached mounts and open_tree clones are collected by a scan of every task's directories and fd table, run at `umount2`, at task exit and when a thread lets go of a detached mount's last use (D48).
-- **Watch out**: Operations on mounts must check that they belong to the caller's namespace (Linux's `check_mnt`).
-- **Source**: round 118 (`118-mount-namespaces`); 922e015
+- **D2** — Mount records live in one global table keyed by id with a task's mount namespace in `FsContext`, unused namespaces and detached mounts are collected by scanning tasks (D48), and mount operations must verify the mount belongs to the caller's namespace (`check_mnt`) (round 118; 922e015)
+- **D6** — Mount propagation follows `fs/pnode.c` peer/master/unbindable groups with `plan_attach` and locked-mount checks; bulk mount operations must use `Index` and `GroupAlloc`, and a mount placed on another mount's root has its `at` in the parent mount (970cf6a, 66b765c)
+- **D12** — Advisory locks and leases are in-process (nothing reaches host locks), keyed by store inode or by overlay/FUSE node (`OpenFile::lock_ino`) for locks and store inode for leases, and closing a file with locks or leases must wake the dedicated lock channel (rounds 08, 19, 53; 2a244d2, c008749)
+- **D13** — inotify runs entirely in the kernel after store mutations in Linux's fsnotify hook order (plus Files app replay under the BKL and cgroup2 watches, D46/D47/D51), keeping the no-watch cost to one emptiness check per event (rounds 11, 19, 201; d7076fc, affb1e2)
+- **D22** — Vectored I/O matches Linux's `read_iter`/`write_iter` split (sockets via kernel/net `rw`, pipes/PTYs/eventfds and non-regular host stdio in 64 KiB stream operations, positional/regular host files per-iovec), and open-file borrows must end before any blocking socket or pipe wait (b295644, a36860b)
+- **D42** — Pending `IOCB_CMD_POLL`s complete in io_getevents, io_cancel and the timer thread (`Kernel::aio_polls`) with `io_submit` matching 6.1 checks, `append_offset`/`write_sync` on writes and `has_iter`/`has_fsync` tables that must track new file kinds; queuing an event must wake the context wait object (fffe1c1)
+- **D43** — `/proc/locks` and fdinfo `lock:` lines are formatted from the lock tables in `locks.rs` using `FlockHolder`/`Lease` tgids, fstat dev/ino and inclusive ranges, scanning fd tables for POSIX locks (39ea702)
+- **D47** — FUSE mounts use a fourth node kind (`Node::Fuse`/`Fs::Fuse`), syscall `FUSE_RETRY` walks, whole-message `/dev/fuse` I/O, top-two-bit lock/inotify keys and `Vfs::mount_nodes`/`Registry::watched` sweeps; handlers must not mutate state or swallow errors before a walk, and new long-lived `Node` holders must join the sweep (c008749, 3957a03)
+- **D49** — Removed overlay nodes become timestamped orphans swept in batches once unreferenced by roots, cwds, mounts, watches, `Hold`s or pre-removal syscalls (except `waits_on_files_only`); every new overlay-node holder must take a `Hold` or join the sweep to prevent use-after-sweep panics (0d82807, 9590431)
+- **D51** — inotify keys reserve top bits per node kind (store `< 2^62`, cgroup2 `01`, overlay `10`, FUSE `11`), every `of_key` check must test both top bits, cgroup2 nodes are never treated as unlinked, and `mounts_changed` bumps and wakes mount pollers (affb1e2)
+- **D53** — `Mounts::sb_flags` tracks per-instance superblock flags (`ro`, `sync`, `dirsync`, `mand`, `lazytime`) by device number; every new filesystem instance must call `new_superblock`, and write checks must consult `Vfs::readonly` rather than a single mount's flags (f52bde6, 9b99931)
+- **D56** — `dotdot` returns `ENOENT` outside a bind root by walking the store's parent chain, and tmpfs mount/remount maps `uid`/`gid` options through the caller's user namespace, rejecting unmapped IDs with `EINVAL` (01bfd882; 20137e4c; d053be24; 39e55b4b)
+
+## Active (full detail)
 
 ### D3: tmpfs is a detached tree in the store, accounted by the pages its objects take
 - **What**: Each tmpfs mount is a new instance backed by a store directory outside the root tree, with its own device number; usage is counted per instance in inodes and in the pages its host objects take, a write or reservation checks room only for the pages it would newly allocate, recounting the instance once first when its usage changed since the last count (`Tmpfs::changed`, `Vfs::tmpfs_recount`), and space is freed at the last unlink. Keep unlinked tmpfs inode charges and track reserved versus instantiated ranges until the last guest reference disappears.
@@ -67,13 +75,6 @@
 - **Watch out**: statfs, remount and a refusal after any charge recount the whole tree, which also corrects drift from shared mappings, so a full tmpfs walks the instance once after each successful charge; a host whose `SEEK_DATA` treats reserved space differently could let a write past a full tmpfs or refuse one.
 - **Source**: rounds 117 (`117-tmpfs`), 131 (`131-tmpfs-usage`); 5d7b936, 9b99931, 0e02d7cd, 71790fde
 
-### D6: Mount propagation follows `fs/pnode.c`: types, peer groups and mount events
-- **What**: Mounts carry Linux's propagation (peer group, master group, unbindable), changed as `change_mnt_propagation` and `do_make_slave` do and inherited by binds, clones and namespace copies; a tree attached under a shared mount is copied to every peer and slave that sees the place (planned by `plan_attach` before attaching, locked in a namespace with another owner), and an unmount takes down the matching mounts of the propagation tree unless locked, `EBUSY` when one is in use.
-- **Why**: Ignored types left dockerd's data root mounted until reboot, let unbindable mounts be bound and skipped the shared-mount checks of `MS_MOVE` and pivot_root, and with types alone peers and slaves never saw each other's mounts (19 suite tests skipped).
-- **Tradeoffs**: Masters are kept per group rather than per mount, propagated copies are appended in target order so mountinfo lists them differently from Linux, and a move whose targets lie inside the moved tree is not special-cased.
-- **Watch out**: Every operation over many mounts must use `Index` and `GroupAlloc`, since large peer groups made a scan per mount hold the BKL past the test limit, and the `at` of a mount on another mount's root lies in the parent mount, which new place-matching code must allow for.
-- **Source**: 970cf6a, 66b765c
-
 ### D8: Mount flags and cross-mount rules follow Linux 6.1's check order
 - **What**: ro is checked per mount and per filesystem instance (`Vfs::readonly`, D53), and noexec, nosuid, nodev and nosymfollow per mount, at the same points and in the same order as Linux; rename and link across mounts are `EXDEV` even between binds of one filesystem; removing or renaming a mount point is `EBUSY` only in the caller's namespace, and mounts on it elsewhere are detached. Apply current mount atime flags to guest store access, including directory reads and O_NOATIME.
 - **Why**: Sandboxes (bubblewrap's `--ro-bind`, `--remount-ro`) and LTP's read-only filesystem tests depend on exact errors and ordering (for example `mkdir -p` must still see `EEXIST` on a read-only mount). Treating mount points in other namespaces as busy broke `podman run --rm`.
@@ -81,33 +82,12 @@
 - **Watch out**: New syscalls that create or modify files must call the read-only check (`Vfs::readonly`, not the mount's own flags) at the matching point.
 - **Source**: rounds 116 (`116-store-binds`), 168 (`168-open-tree`); f52bde6, 9b99931, 30e5002e
 
-### D12: Locks and leases are in-process, keyed by store inode or by overlay or FUSE node
-- **What**: `flock`, POSIX record locks (owned by the fd table, released by any close of the file) and OFD locks (owned by the open file) split and merge ranges and detect POSIX deadlocks; leases follow Linux's rules; locks are keyed by the store inode (bind mounts share them), by the overlay node for a file opened through an overlay and by the FUSE node for a FUSE file (`OpenFile::lock_ino`), and leases by the store inode behind the file; nothing reaches host locks.
-- **Why**: All guest processes run in one kernel layer, so in-kernel tables give exact Linux semantics; wake-ups go to a dedicated lock channel so unlocking does not wake every poller.
-- **Tradeoffs**: Locks are not visible to another kernel or to the Files app sharing the store.
-- **Watch out**: Closing a file with locks or leases must request the lock channel.
-- **Source**: rounds 08 (`08-m6`), 19 (`19-deferred`), 53 (`53-locks-host-sockets`); 2a244d2, c008749
-
-### D13: inotify is implemented entirely in the kernel layer
-- **What**: Syscalls report events after changing the store, at the positions and in the order of Linux's fsnotify hooks; watches are keyed by store inode or by the key of an overlay, FUSE or cgroup2 node (D46, D47, D51); per-fd events use the directory and name the file was opened through; Files app changes are replayed under the target kernel's BKL.
-- **Why**: Every filesystem change passes through the kernel layer, so no host notification is needed; Java's WatchService and Node.js's `fs.watch` needed inotify. The early approximations (files opened before a watch, renamed open files, immediate `IN_DELETE_SELF`, unenforced limits) were removed to match Linux.
-- **Tradeoffs**: Synthetic filesystems other than cgroup2 accept watches but never report; no fanotify; the provider only reports creates, removes, moves, write opens and writes.
-- **Watch out**: Keep the no-watch cost at one emptiness check per event.
-- **Source**: rounds 11 (`11-m8-jvm`), 19 (`19-deferred`), 201 (`201-documents-notify`); d7076fc, affb1e2
-
 ### D15: kernel/vfs owns resolution, metadata and tmpfs; open files belong to kernel/files
 - **What**: kernel/vfs keeps path resolution, mount-flag checks, tmpfs instances and accounting, metadata and namespace calls, getdents64 and device nodes, while kernel/files owns fd tables, opening, data I/O, truncation and syncing alongside the already separate filesystem modules.
 - **Why**: The fully refreshed VFS map reached 61.5 KB, beyond one read, and open files form a coherent subsystem apart from resolution and metadata.
 - **Tradeoffs**: Boundaries run inside shared files, opens and writes need both maps for mount flags and tmpfs duties, and pre-split decisions retain their original tags and IDs here; device checks and cgroup mkdir/rmdir policy belong to kernel/cgroup while synthetic node adapters stay in kernel/procfs.
 - **Watch out**: The confirmed reopen and file-position bugs moved to kernel/files, where 01bfd882 fixes reopens and write-position checks but leaves the lseek race; tmpfs accounting and remaining VFS fidelity gaps stay in this module’s map.
 - **Source**: c5236a1, a536142, cc160c1, 5f327de (scope since extended by 3f3db11 and 2a244d2 and narrowed by d2b1dc3; bug list since updated by 3f3db11, 4e64e74, 70c1bc6, ce8a9ce, 2aca260, d9e1f0c, 9b99931 and a36860b); ce193253; 01bfd882; 20137e4c; cf029f9a; d053be24; 39e55b4b
-
-### D22: Vectored I/O on pipes, terminals, sockets and host stdio streams is one operation
-- **What**: Following Linux's split between `read_iter`/`write_iter` and plain operations (checked against 6.1), sockets go to kernel/net's `rw` (D13 there), pipe, PTY and eventfd reads do one 64 KiB read scattered over the iovecs, pipe and PTY writes go in 64 KiB pieces across iovecs until one is short, `stream_vectored` sends `appine-run`'s host stdio down the same pipe path unless `host_regular` finds a regular file on the host, and positional files and such regular files keep the per-iovec loop.
-- **Why**: readv and writev called the file's read or write once per iovec, so message boundaries, pipe readv waits and pipe write atomicity differed from Linux, and on host stdio a filled first iovec waited for more input and a small writev (musl flushes stdout with two iovecs) was not one write.
-- **Tradeoffs**: A pipe, terminal or host stdio readv still reads at most 64 KiB per call, and every readv or writev on host stdio costs one host fstat.
-- **Watch out**: Borrows of the open file must end before any socket or pipe call that can wait, a file kind whose Linux operations change between plain and iter needs its arm moved, and a host regular file that behaves like a stream would keep the per-iovec loop.
-- **Source**: b295644, a36860b
 
 ### D32: Inherited mounts are locked, and proc, sysfs and cgroup2 check their namespace's owner
 - **What**: Copying a mount namespace into one owned by another user namespace locks every copy (`Mount::locks`: the mount itself and its ro, nodev, nosuid, noexec and atime flags), so umount2, moves and pivot_root refuse a locked mount (`EINVAL`), remount and mount_setattr refuse to clear a locked flag (`EPERM`), and a non-recursive bind or clone of a tree with locked mounts below is `EINVAL`; lazy unmounts and namespace collection keep a locked mount on a parent detached with it, as 6.1's `disconnect_mount` does; proc, sysfs and cgroup2 need `CAP_SYS_ADMIN` over the owner of their pid, network or cgroup namespace, and outside the initial user namespace proc and sysfs also need a fully visible instance, whose locked flags the new mount takes over.
@@ -130,33 +110,12 @@
 - **Watch out**: Code that builds a `Node::Store` from an overlay file's store inode or calls store mutations on a layer bypasses copy-up and whiteouts.
 - **Source**: 4b4af75 (since changed by df6ee70 and 0d82807); 01bfd882 (kernel/overlay D2); 20137e4c; d053be24; 39e55b4b
 
-### D42: Pending AIO polls complete outside io_getevents, and io_submit follows 6.1
-- **What**: io_getevents waits on its pending polls' files as ppoll would, plus the context's wake object (kernel/poll D16); io_cancel first completes ready polls; the timer thread watches the contexts with eventfd-signalling polls (`Kernel::aio_polls`, kernel/process D11); the resfd eventfd is taken at submission, and releasing a context signals its cancelled polls' eventfds; writes take `append_offset` and `write_sync` as pwritev2 does; io_submit follows `io_submit_one` and the per-command checks, with a `read_iter`/`write_iter` table (`has_iter`) and `has_fsync`; events whose copy faults go back to the queue.
-- **Why**: Pending `IOCB_CMD_POLL`s completed only inside io_getevents on their context, so a resfd eventfd watched with epoll never fired and polls on host sockets or timerfds were seen late or never; AIO writes also ignored `O_APPEND` and the `RWF_*` sync flags, a faulting copy lost events, and io_submit queued requests 6.1 refuses.
-- **Tradeoffs**: An eventfd-signalling poll completes when the timer thread next runs rather than inside the readying write, and synthetic files are all taken to have `read_iter` and `write_iter`, which `/proc/<pid>/mem` and pagemap do not.
-- **Watch out**: io_getevents sleeps on the context object, so a path that queues an event without requesting it leaves waiters asleep; `has_iter` must follow new file kinds, and its `/dev/kmsg`, loop-control, seccomp and bpf entries were not checked natively.
-- **Source**: fffe1c1
-
-### D43: Lock listings come from the lock tables
-- **What**: `FlockHolder` and `Lease` record their taker's tgid, and `locks.rs` formats `/proc/locks` and fdinfo `lock:` lines as `lock_get_status` does, with fstat's device and inode (an overlay node's shown inode) and inclusive ranges, numbering `/proc/locks` by position without invisible pids and fdinfo per open file.
-- **Why**: Both listings need each lock's taker, file and range, which belong with the lock tables as in Linux's `fs/locks.c`.
-- **Tradeoffs**: Entries come by kind and inode instead of newest first, `F_SETLKW` waiters are not listed, and a POSIX lock shows under the open file of its table's lowest fd on the file.
-- **Watch out**: Listing scans fd tables for POSIX locks, which is cheap only while few locks are held.
-- **Source**: 39ea702
-
 ### D45: Clones share store objects until a file is written
 - **What**: FICLONE, FICLONERANGE and whole-file copy_file_range share the store's object through `try_share` (copying instead for memfds, overlay and tmpfs files, deleted sources, sources with a writer not marked `cow` or a writable shared mapping, mapped, sealed or unsharing destinations, and objects out for host writing by the Files app); every change calls `prepare_write` or `make_private` first, copying with the BKL released, and `rehome` moves every description to the new object, also when a Files app open makes a held file private (`host_unshared`).
 - **Why**: The guest's clone calls must share, every change must unshare first, every description must follow its file, and `try_share` had checked only the kernel's own writers.
 - **Tradeoffs**: Private mappings, and after a Files app unshare shared mappings too, stay on the old object; FICLONE succeeds on a filesystem reporting ext4's magic, FIDEDUPERANGE stays `EOPNOTSUPP`, copy_file_range can return more than `MAX_RW_COUNT`, and a source with a writer is copied.
 - **Watch out**: Any new path that changes a regular file must call `prepare_write` first with no borrow of the file held, and a description borrowed during `rehome` keeps its old handle (logged).
 - **Source**: df6ee70, 1f99a1c
-
-### D47: FUSE nodes are a fourth node kind with FUSE branches in the VFS
-- **What**: `Node::Fuse(MountId, FuseId)` and `Fs::Fuse` give FUSE mounts instances of their own, the walk returns `FUSE_RETRY` when it needs the daemon, `/dev/fuse` is `FileKind::FuseDev` with whole-message reads, writes and splices, FUSE files are `FileKind::Fuse`, `collect` aborts instances without mounts, FUSE keys take the top two bits for locks and inotify, and `Vfs::mount_nodes` and `Registry::watched` let kernel/fuse's sweep see every mount's nodes and watch.
-- **Why**: FUSE nodes have no store inode and their content comes from a daemon, which libfuse drives with read, writev and splice on `/dev/fuse`.
-- **Tradeoffs**: Every exhaustive match on `Node` and `FileKind` grows, a spliced reply's length rewrite accepts what Linux rejects when the pipe holds less, path-based attribute changes on FUSE nodes report no inotify events, and each sweep enumerates the holders.
-- **Watch out**: Code that swallows walk errors or changes state before a walk breaks the retry, store, overlay and FUSE keys must never collide, and a new long-lived holder of `Node` values must join the sweep's scan.
-- **Source**: c008749, 3957a03
 
 ### D48: Detached mounts go when their last use does
 - **What**: Each thread records the mounts of the open files, cwds and roots it lets go of (`vfs::released`, up to 16 and then "any", from an open file's drop and `FsContext`'s `set_cwd`, `set_root` and drop), and the dispatcher's `collect_released` and thread exit's `collect_unused` collect when one of them is detached, scanning in-use mounts with `try_borrow` and retrying later.
@@ -165,13 +124,6 @@
 - **Watch out**: A new holder counted by `in_use` that does not report its release leaves its mount behind until the next collection, as holders that release `ROOT_MOUNT` instead of their node's mount, never-attached open_tree clones and mounts detached by removing their mount point already do (kernel/mount's map), and the per-syscall check must stay a thread-local test when nothing was released.
 - **Source**: 922e015 (Watch out since corrected after 49bb4f6's kernel/mount Decision)
 
-### D49: Removed overlay nodes are swept once nothing can use them
-- **What**: Removed overlay nodes become orphans stamped with the syscall count, and once 1024 have gathered (then twice those left) the end of a syscall frees each orphan whose subtree no process root or cwd, mount, inotify watch or `Hold` (taken by open files and running programs) names and that no syscall another thread began before its removal may still use, unless that syscall waits only on files it holds (`waits_on_files_only`).
-- **Why**: Overlay nodes lived until the instance's last mount was collected, so memory grew by one node per name ever removed in a long-running container.
-- **Tradeoffs**: Nodes of names that still exist stay while mounted, orphans wait for long path-based syscalls in other threads, `Hold` takes a global mutex at each overlay open and close, and a node number held in another kernel of the process keeps this kernel's node of that number.
-- **Watch out**: A new holder of overlay nodes that neither takes a `Hold` nor joins the sweep's scan, or a node-holding wait added to `waits_on_files_only`, lets a node go while used and makes its next lookup panic.
-- **Source**: 0d82807, 9590431
-
 ### D50: `system.*` xattrs follow Linux's POSIX ACL rules
 - **What**: Setting `system.posix_acl_*` follows `posix_acl_xattr_set` and `set_posix_acl` (other `system.*` names `EOPNOTSUPP`, owner or `CAP_FOWNER`, validated, default ACLs only on directories), a base-entries access ACL becomes a chmod, other ACLs are stored with kernel IDs and shown in the reader's namespace, and the walker asks a synthetic view for its search check (`Pseudo::searched`).
 - **Why**: `system.*` was stored raw with no permission check, so anyone who could resolve a file could set or remove its ACLs or invent other `system.*` names.
@@ -179,34 +131,12 @@
 - **Watch out**: Preserve named entries when recovering class permissions from older stores and use the same ACL rules for overlay creation.
 - **Source**: f5c09f7, 68b70897
 
-### D51: inotify keys give each node kind its own top bits, and cgroup2 files report
-- **What**: Store inode numbers stay below 2^62, overlay keys take top bits 10, FUSE keys 11 and cgroup2 nodes 01 (`cgroup::key`), every `of_key`-style check tests both bits, cgroup2 nodes are never taken as unlinked, and `mounts_changed` bumps the mount event counter and wakes its pollers.
-- **Why**: inotify keys had no room for synthetic files, and `overlay::of_key` took FUSE keys for overlay nodes.
-- **Tradeoffs**: Store inode numbers must stay below 2^62.
-- **Watch out**: A new key kind must take a free bit pattern, and every check must keep testing both bits.
-- **Source**: affb1e2
-
 ### D52: Exec seals, pivot_root lookups and deleted mount roots follow Linux
 - **What**: chmod refuses a change of execute bits on a memfd sealed with `F_SEAL_EXEC` as 6.3 does (memfd_create refuses the MFD exec flags, and the exec seal on an executable memfd adds the write seals), pivot_root looks each path up as a directory in turn, and removing the name a mount's root is marks the mount (`roots_removed`) so mountinfo shows that root with `//deleted`.
 - **Why**: A sealed memfd could be made executable again, pivot_root answered `ENOENT` for a file new_root with a missing put_old, and mountinfo showed `/` as the root of a bind whose source was removed.
 - **Tradeoffs**: The exec seal stays a 6.3 feature on a 6.1 contract, a deleted root's path comes from its former parent, and a root reached without a recorded name is marked only once it has no links left.
 - **Watch out**: A new way of removing a name that skips `detach_points` leaves its mounts' roots looking alive in mountinfo.
 - **Source**: 5760479
-
-### D53: Filesystem instances have superblock flags of their own
-- **What**: `Mounts::sb_flags` keeps read-only, sync, dirsync, mand and lazytime per instance by device number, set when an instance is created (`new_superblock`) and by a remount without `MS_BIND` (all but dirsync), so `readonly` covers every mount of a read-only instance (an overlay without an upper layer included) and write opens check it instead of the mount's own flags, mountinfo, `/proc/<pid>/mounts` and statfs report them, and a read-only remount checks writers on every mount of the instance only when the instance itself turns read-only.
-- **Why**: Read-only was a flag of one mount, so a read-only tmpfs turned writable through a bind remount, binds did not inherit a read-only instance, and mountinfo always said rw; write opens still read the mount's flags afterwards, so a rw bind over an instance remounted read-only could write and truncate.
-- **Tradeoffs**: sysfs, cgroup2 and mqueue mounts reuse an instance and ignore the flags they are mounted with, and sync, dirsync, mand and lazytime are only recorded and reported.
-- **Watch out**: A read-only remount of `/` without `MS_BIND` makes the whole store read-only for every mount of it, as on Linux, a new way of creating an instance must call `new_superblock`, and a write check reading a mount's own flags instead of `Vfs::readonly` misses read-only instances.
-- **Source**: f52bde6, 9b99931
-
-### D56: Bind-root traversal and tmpfs owner options respect their boundaries
-
-- **What**: `dotdot` returns ENOENT outside a bind root, and tmpfs mount/remount maps uid/gid options through the caller’s user namespace, rejecting unmapped IDs.
-- **Why**: Renaming directories out of a bind subtree escaped its walk boundary, and tmpfs options used host-side IDs.
-- **Tradeoffs**: Each parent traversal under a non-root bind walks the store’s parent chain.
-- **Watch out**: Deep bind trees pay for the walk, and previously accepted unmapped owner options now fail with EINVAL.
-- **Source**: 01bfd882; 20137e4c; d053be24; 39e55b4b
 
 ### D59: Timestamp updates share ownership checks and notification handling
 
@@ -270,6 +200,30 @@
 - **Tradeoffs**: W_OK on the read-only own fd directory remains denied.
 - **Watch out**: Add new mutable or non-world-searchable synthetic directories to the policy.
 - **Source**: 36005e07, 3ad68857
+
+### D66: Non-FUSE `faccessat` checks full backing ACLs and GPU fence fds support anonymous stat
+
+- **What**: Resolve full backing inode attributes (including extended access ACLs, immutable flags, and unlinked `O_PATH` tmpfs fallbacks) through `access_attrs` in `faccessat`, and include `FileKind::GpuFence(_)` in `file_stat_attrs`'s `ANON_DEV` arm.
+- **Why**: Non-FUSE `faccessat` rebuilt a bare `Stat` without access ACLs and disagreed with `open()`, while `fstat` and empty-path `statx` on GPU fence fds returned `EBADF`.
+- **Tradeoffs**: `access_attrs` branches on store, overlay, proc-fd, and proc-exe targets separately from `node_stat` instead of extending the ABI stat buffer.
+- **Watch out**: Any new `PseudoNode` magic-link variant resolving to a store or overlay inode must be handled in `access_attrs` to preserve ACL fidelity.
+- **Source**: 0160070e
+
+### D67: Tmpfs faults batch across extents and `unlink` runs from one parent lookup
+
+- **What**: Batch tmpfs mapping faults with `TmpfsMapping::fault_range`/`fit_fault_range` across populated `SEEK_HOLE` extents and quota-bounded hole allocations, and dispatch `unlink` from one `resolve_parent` using `store.attrs` in `may_delete`, `Store::remove_checked`, `removed_dir` in `detach_points`, and `LazyCell` `store.attrs` loading in `roots_removed`.
+- **Why**: Per-page tmpfs faults ran multiple host syscalls under the BKL, and `unlink` repeated `resolve_parent` five times alongside redundant host `fstatat` and `store.attrs` calls.
+- **Tradeoffs**: `fit_fault_range` falls back to single-page allocation when a multi-page `fallocate` hits quota or host-space exhaustion.
+- **Watch out**: Future changes to `unlink` error precedence must keep the single-walk `remove_checked` closure aligned with Linux 6.1 checks.
+- **Source**: b38371ff
+
+### D68: Path walks use a stack-backed queue and `Cached` serves no-BKL `readlink` and `access`
+
+- **What**: Replace per-component heap allocations in `Vfs::walk_in` with a stack-backed `WalkPending` borrowing slices from the input path and indexed symlink buffers, and add no-BKL `Cached::readlink` and `Cached::access` using `CachedCred` and snapshotted `ROOT_MOUNT` flags.
+- **Why**: Ordinary BKL path walks allocated a `VecDeque` and a `Vec<u8>` per component, and `readlinkat`/`faccessat` lacked no-BKL fast paths.
+- **Tradeoffs**: `WalkPending` reserves a 32-slot inline array on `walk_in`'s stack, and `Cached::access` falls back to the BKL for non-root group or ACL checks.
+- **Watch out**: Symlink target storage still grows up to `MAX_SYMLINKS` per walk, and any new `ROOT_MOUNT`/`ROOT_DEV` flag mutation must keep `rebuild_cached` in sync.
+- **Source**: cb0f3059
 
 ## Superseded
 

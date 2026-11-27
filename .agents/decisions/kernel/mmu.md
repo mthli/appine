@@ -2,7 +2,7 @@
 
 > Snapshot of current consensus. Evolution: `git log --grep="MODULE: kernel/mmu"`
 >
-> Last distilled: 2026-11-26 (HEAD = e8ac8ebf)
+> Last distilled: 2026-11-27 (HEAD = 2f321b12)
 >
 > Soft-MMU decisions made before kernel/mmu was split from kernel/mm keep their `kernel/mm` tags and live in `.agents/decisions/kernel/mm.md`: D1, D13, D16, D39 and the page-table half of D4.
 
@@ -102,3 +102,19 @@
 - **Tradeoffs**: Adds one C/Rust MMU entry point and slightly widens `PageWatch` expiration and demand re-faulting across a cleared 2 MiB superpage on demotion OOM.
 - **Watch out**: Never use `unmap_noalloc` to widen over private anonymous VMAs that rely on `touched_windows` or PTE presence instead of demand re-faulting from file or FUSE backing.
 - **Source**: e9761fd4
+
+### D13: Guest entry pairs a single `SeqCst` fence with relaxed generation loads and Tier 1 `InGuest` code-generation polling
+
+- **What**: Full guest entry writes `in_guest` relaxed, issues one `fence(SeqCst)`, loads `(tlb, code, space)` relaxed with `fence(Acquire)` on TLB change, and non-sleeping fast syscalls staying `InGuest` exit guest mode when `dbt.is_some()` and `generations.code` changed to preserve `space -> tlb -> code` ordering.
+- **Why**: Issuing three separate `SeqCst` loads after a `SeqCst` store to `in_guest` added hot-path barrier overhead, while staying in guest mode across fast syscalls still needed sound synchronization with `Mm::sync`, `Mm::quiesce`, `Mm::shootdown`, and un-kicked code-only invalidations.
+- **Tradeoffs**: Adds one relaxed `generations.code` load per non-sleeping fast syscall in Tier 1.
+- **Watch out**: Relies on every `space_generation` and `tlb` generation bump kicking in-guest users and on Tier 0/Tier 1 entry checking `cpu->pending` before executing guest instructions.
+- **Source**: da5ba1ef
+
+### D14: `Mm::sync_except` shoots down only in-guest threads and `syscall::dispatch` gates sync on `Mm::needs_sync()`
+
+- **What**: Share `shootdown_users()` (a `SeqCst` generation bump followed by kicking and waiting on only `in_guest` threads with brief `spin_loop` before `yield_now`) between `Mm::sync_except` and `Mm::shootdown`, keep `Mm::quiesce_except` kicking all users for fork and membarrier, and gate post-syscall `Mm::sync` in `syscall::dispatch` on `Mm::needs_sync()`.
+- **Why**: Calling `Mm::quiesce_except` from `Mm::sync_except` spuriously sticky-kicked parked futex/epoll threads on `munmap`/`mprotect`, and `syscall::dispatch` unconditionally cloned `Arc<TaskSync>` and mutably borrowed `Mm` even when nothing was dirty.
+- **Tradeoffs**: `sync_except` always bumps the generation when dirty or when the graveyard is non-empty so parked threads flush lazily on their next guest entry instead of being kicked.
+- **Watch out**: Any future state cleared by `Mm::sync` must be reflected in `Mm::needs_sync()`, and fork and membarrier must continue calling `Mm::quiesce` rather than `shootdown_users`.
+- **Source**: ff0a4e4c

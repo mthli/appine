@@ -2,7 +2,7 @@
 
 > Snapshot of current consensus. Evolution: `git log --grep="MODULE: kernel/overlay"`
 >
-> Last distilled: 2026-11-26 (HEAD = 3ad68857)
+> Last distilled: 2026-11-27 (HEAD = 2f321b12)
 >
 > Overlay decisions made before kernel/overlay was split from kernel/vfs keep their `kernel/vfs` tags and live in `.agents/decisions/kernel/vfs.md`: D39, D40 and D49; those tagged `kernel/process` live in `.agents/decisions/kernel/process.md`: D45 and D46.
 
@@ -39,5 +39,14 @@
 - **Watch out**: Validate recorded origins against the mounted lower roots and pin raw node IDs across waits.
 - **Source**: ec233137, 4e279fa9, eea43393, ab417943
 
+### D5: Overlay instances cache origin, impure and opaque upper xattrs with rollback-safe updates
+
+- **What**: Cache three-state `origins` (`Absent`/`Invalid`/`Valid`), `impure`, and `opaque` private xattrs per overlay `Instance`, evicting `impure` inside external transactions (`mark_impure`), publishing `true` only after commit, and clearing entries via `forget_upper` on upper removals or overwrites.
+- **Why**: Positive-only `origins` caching and uncached `impure`/`opaque` queries ran SQLite `get_xattr` on every upper lookup and cold `readdir` entry.
+- **Tradeoffs**: Each mounted overlay instance retains modest per-mount cache memory proportional to accessed upper inodes until unmount or remount.
+- **Watch out**: Any new direct upper-layer xattr mutation bypassing `overlay.rs` helpers must invalidate the matching `Instance` cache entry.
+- **Source**: b38371ff
+
 ## Superseded
 - ~~Always sharing the lower regular-file object on copy-up (df6ee70; kernel/vfs D40)~~ → replaced by **D2** in 01bfd882 (2026-11-12)
+- ~~Positive-only `origins` caching and uncached `impure`/`opaque` SQLite lookups (D4 in part, eea43393)~~ → replaced by **D5** in b38371ff (2026-11-27)

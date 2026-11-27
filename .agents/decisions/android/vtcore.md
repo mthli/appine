@@ -2,7 +2,7 @@
 
 > Snapshot of current consensus. Evolution: `git log --grep="MODULE: android/vtcore"`
 >
-> Last distilled: 2026-11-26 (HEAD = 3ad68857)
+> Last distilled: 2026-11-27 (HEAD = 2f321b12)
 >
 > Decisions made before android/vtcore was split from android/vt retain their `android/vt` tags in `.agents/decisions/android/vt.md`: D1, D3, D4 and the parsing side of D5–D7; earlier `android/terminal` decisions remain in `.agents/decisions/android/terminal.md`: D2, D5, D6, D8, D16, D17, D32, D33, D35–D39 and D42–D49.
 
@@ -63,6 +63,14 @@
 - **Tradeoffs**: JNI and Kotlin carry the native generation.
 - **Watch out**: Cancel unfinished escape sequences on explicit reset.
 - **Source**: 565f4a4e
+
+### D8: `vt-pump` batches console run-state reads, caches foreground lookups, and truncates transcripts in C
+
+- **What**: `on_render_hold` records only `held` and `held_since`, `vt-pump` reads output plus password/foreground identity in one `Machine::read_console_run_state` call with `FgCache::resolve` (using `fg_pgrp` for status expiry and skipping or caching `console_foreground_process`), and `appine_vt_transcript` formats a bounded tail (`format_transcript_tail`, `utf8_tail_offset`, `keep_text_slice`) truncated to 256 Ki UTF-16 code units before JNI.
+- **Why**: Per-read console polling took four BKL locks and queried guest `mm.args` even for OSC 133 shells, `on_render_hold` allocated a full render state under `Tab.term`, and `appine_vt_transcript` decompressed and copied up to 10 MiB across JNI only for Kotlin to keep the tail.
+- **Tradeoffs**: `FgCache` misses in ash or unmarked shells still query `console_foreground_process` once per foreground transition, and sparse short-line scrollback falls back to full formatting after testing the tail window.
+- **Watch out**: A guest process mutating its own `argv` memory in place without `execve` or `PR_SET_NAME` keeps the cached fallback title until a foreground change or probe timeout.
+- **Source**: 2f321b12
 
 ## Superseded
 

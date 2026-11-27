@@ -2,7 +2,7 @@
 
 > Snapshot of current consensus. Evolution: `git log --grep="MODULE: kernel/fuse"`
 >
-> Last distilled: 2026-11-26 (HEAD = e8ac8ebf)
+> Last distilled: 2026-11-27 (HEAD = 2f321b12)
 >
 > The VFS side of FUSE (the `Node::Fuse` kind, `/dev/fuse` as a file kind, key bits and the sweep's view of mounts) is kernel/vfs's D47 and D51; FUSE becoming a module of its own is knowledge-loop D7.
 
@@ -103,6 +103,14 @@
 - **Tradeoffs**: Non-nosuid FUSE execs perform one extra `FUSE_GETXATTR` retry when xattrs are supported, unlinked exe reopens serve the exec-time memfd snapshot instead of re-opening on the daemon, and `syscall/fuse.rs` keeps small shared truncation/pinning and unit-test harness helpers.
 - **Watch out**: Future `FileKind` or `OpenFile::node()` consumers must handle `fuse::id_of` keys and `FileKind::FuseSnapshot`.
 - **Source**: 7b505898, 263e23bc
+
+### D13: `/dev/fuse` reads and splices commit queue state only after delivery succeeds
+
+- **What**: Stage deliverable messages via `Conn::peek_forget`, `Conn::stage_read`, `Conn::commit_read`, and `dev_read_with` so scalar `read`, vectored `readv`, and `/dev/fuse`-to-pipe `splice` deliver the full message with `Conn` unborrowed under the BKL and commit queue, `ReqState::Sent`, `next_unique`, and `forget_batch` state only on `Ok`.
+- **Why**: `dev_read` previously marked requests `Sent` and queued interrupts before copying to daemon memory or checking pipe capacity, hanging foreground callers on `EFAULT` or `EIO`.
+- **Tradeoffs**: The delivery callback must hold the BKL without yielding so no concurrent reader can stage the same message, and a partial `EFAULT` still leaves the copied prefix in daemon memory.
+- **Watch out**: Any future `dev_read_with` caller releasing the BKL inside its delivery callback could duplicate a staged message to another reader.
+- **Source**: 0160070e
 
 ## Superseded
 

@@ -2,7 +2,7 @@
 
 > Snapshot of current consensus. Evolution: `git log --grep="MODULE: engine"`
 >
-> Last distilled: 2026-11-26 (HEAD = e8ac8ebf). D1–D18 were seeded by hand from the retired design
+> Last distilled: 2026-11-27 (HEAD = 2f321b12). D1–D18 were seeded by hand from the retired design
 > doc §4 and the round records in `docs/rounds/`, so their sources cite rounds; later entries cite
 > commits.
 
@@ -104,6 +104,14 @@
 - **Tradeoffs**: Normalizing `cpu->pc` at engine entry handles signals, `rt_sigreturn`, `ptrace` and direct engine callers uniformly without modifying kernel register setters.
 - **Watch out**: Inspecting `cpu->pc` after a `Kick` on first entry observes the post-`ERET` untagged TTBR0 PC rather than the pre-`ERET` raw value, matching hardware and `engine/dbt`.
 - **Source**: 6a979929, 8a839900
+
+### D32: Normal-context fault-guard lookups cache the per-thread guard in `_Thread_local`
+
+- **What**: `guard.c` caches the per-thread `struct guard *` in `_Thread_local` for normal-context calls (released by the `pthread_key_t` destructor), keeps `handler()` reading `pthread_getspecific`, fences before arming `g->armed`, and skips `write_fpcr` in `recover()` when unchanged while keeping `read_fpcr()` on entry.
+- **Why**: Every guarded run and lock registration previously paid an atomic acquire load of `installed` and a `pthread_getspecific` call.
+- **Tradeoffs**: Retains one non-serializing `mrs fpcr` per guarded run plus `pthread_key_t` registration for signal delivery and thread-exit cleanup.
+- **Watch out**: Keep `handler()` off `_Thread_local` so signals on unrelated threads in `dlopen`'d libraries never trigger lazy dynamic-TLS allocation.
+- **Source**: d2eb8398
 
 ## Superseded
 

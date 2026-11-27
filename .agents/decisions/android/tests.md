@@ -2,7 +2,7 @@
 
 > Snapshot of current consensus. Evolution: `git log --grep="MODULE: android/tests"`
 >
-> Last distilled: 2026-11-26 (HEAD = e8ac8ebf)
+> Last distilled: 2026-11-27 (HEAD = 2f321b12)
 >
 > Decisions on android/tests made before it was split from android/native keep their `android/native` tags and live in `.agents/decisions/android/native.md`: D5, D8, the test portions of D9, D12–D14, D16, D19 and D23–D32.
 
@@ -111,3 +111,27 @@
 - **Tradeoffs**: Instrumentation execution requires a device or emulator with pre-fetched `target/` assets while JVM tests cover only pure-Kotlin orchestration, with minor indirection through local test helpers.
 - **Watch out**: `MachineTest.degradedPerStartConfigAllowsExistingStoreToBoot` has been compile- and lint-checked only and still needs on-device execution.
 - **Source**: 12ac97cf, f7d164db
+
+### D14: Batched per-start preparation adds `FakeStoreAccess` JVM tests and `StartPreparation` checks
+
+- **What**: `MachineTest.degradedPerStartConfigAllowsExistingStoreToBoot` consumes `StartPreparation` and asserts `openRcDone == false`, while three new `StartConfigTest` cases over `FakeStoreAccess` verify unchanged-asset skipping, upgrade rewrites, obstructed `openrc-setup-done` fallback, and fail-fast versus degraded error handling.
+- **Why**: Batched `prepareStart` return values, write skipping, upgrade overwrites, and marker fallback behavior require deterministic regression coverage.
+- **Tradeoffs**: JVM unit tests mock `StoreAccess` rather than exercising the JNI `withStore` bridge directly.
+- **Watch out**: `MachineTest` instrumentation was compile- and lint-checked only and still requires execution on an ARM64 emulator or device.
+- **Source**: 641769ab
+
+### D15: `TerminalResizeTest` keeps software pixel checks and adds hardware `RenderNode` recording coverage
+
+- **What**: `TerminalResizeTest` retains its software `sameAs()` preview tests unchanged, lifts `renderer`, `rowNodes`, and `drawHardware` helpers onto `Fixture`, and adds `hardwareRecordingPopulatesAndRecoversAfterDiscard` to test viewport `RenderNode` population and recovery after `discardDisplayLists()`.
+- **Why**: Software `Canvas(Bitmap)` draws only exercise `VtRenderer`'s software fallback and leave hardware `RenderNode` recording and discard recovery untested in instrumentation.
+- **Tradeoffs**: The hardware test verifies display-list population and recovery rather than GPU-rasterized pixels.
+- **Watch out**: The new instrumentation case was compile- and lint-checked only and still requires `connectedDebugAndroidTest` on a device or emulator.
+- **Source**: e98ff62c
+
+### D16: Mode 2026 shell-integration tests assert incremental redraws after holds
+
+- **What**: `VtShellIntegrationTest.twoPhaseFrameCaptureHandlesSyncHoldAndConcurrentOutput` asserts `dirty != VtFrame.DIRTY_FULL` and `rowCount < rows` on both `afterHold` and `burstFrame`.
+- **Why**: Text-only visibility assertions would not catch regressions that fall back to full-screen redraws after synchronized-output holds.
+- **Tradeoffs**: Assertions run inside the existing test case with negligible overhead.
+- **Watch out**: The updated test was compile-checked via `assembleDebugAndroidTest` only and still needs `connectedDebugAndroidTest` on a device or emulator.
+- **Source**: 2f321b12

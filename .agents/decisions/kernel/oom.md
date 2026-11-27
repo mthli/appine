@@ -2,7 +2,7 @@
 
 > Snapshot of current consensus. Evolution: `git log --grep="MODULE: kernel/oom"`
 >
-> Last distilled: 2026-11-26 (HEAD = 3ad68857)
+> Last distilled: 2026-11-27 (HEAD = 2f321b12)
 >
 > Decisions on memory accounting and the OOM killer made before kernel/oom was split from kernel/mm keep their `kernel/mm` tags and live in `.agents/decisions/kernel/mm.md`: D26, D29, D32, D35 and D44.
 
@@ -38,3 +38,11 @@
 - **Tradeoffs**: A failed resample must fall back to the earlier measurement.
 - **Watch out**: Keep translations needed by live group members.
 - **Source**: 567ff786, ab417943
+
+### D5: OOM swap walks skip `Vma::present_run`, cache shared `Mm` stats, and bound-check `proc_score`
+
+- **What**: Skip per-page `mmu.next_present` FFI probes across contiguous `Vma::present_run` spans in `swappable_nonresident_pages`, cache shared `Mm` stats and `SwapContext::Fallback` candidates in `select_with`, use `was_written()` for resident accounting, and short-circuit `proc_score` when swap bounds cannot alter the rounded score.
+- **Why**: Per-4 KiB FFI probes under the BKL and repeated scoring and fallback-swap scans for shared address spaces made OOM scoring and `/proc/<pid>/oom_score` reads unnecessarily expensive.
+- **Tradeoffs**: Maintains a monotonic `Vma::present_run` hint (reset on unmap, discard, or split) and a per-pass cache in `select_with`.
+- **Watch out**: Failing to shrink or clear `present_run` when unmapping soft PTEs would cause `swappable_nonresident_pages` to skip over unmapped holes.
+- **Source**: b38371ff

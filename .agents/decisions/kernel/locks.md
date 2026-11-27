@@ -2,7 +2,7 @@
 
 > Snapshot of current consensus. Evolution: `git log --grep="MODULE: kernel/locks"`
 >
-> Last distilled: 2026-11-26 (HEAD = 3ad68857)
+> Last distilled: 2026-11-27 (HEAD = 2f321b12)
 >
 > Lock and lease decisions made before kernel/locks was split from kernel/vfs keep their `kernel/vfs` tags and live in `.agents/decisions/kernel/vfs.md`: D12, D43 and the lock-range half of D25.
 
@@ -30,3 +30,11 @@
 - **Tradeoffs**: A conversion drops the previous mode before attempting the new one.
 - **Watch out**: Remove wait records on every exit and report the daemon inode for FUSE.
 - **Source**: 021c7fc2, d10f2973, ef8afe48, fcf3989d, ab417943
+
+### D4: `Locks::closed` short-circuits when no POSIX record locks exist
+
+- **What**: Return early in `Locks::closed` when `self.by_key.is_empty()` and stop batch close loops as soon as `by_key` becomes empty.
+- **Why**: Every `close(fd)` previously built `LockKey::of(...)` (borrowing pipes, sockets, or PTYs) even when zero POSIX locks were held.
+- **Tradeoffs**: None.
+- **Watch out**: None; an empty `by_key` table guarantees no POSIX record locks exist for any closed descriptor.
+- **Source**: b38371ff

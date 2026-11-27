@@ -2,7 +2,7 @@
 
 > Snapshot of current consensus. Evolution: `git log --grep="MODULE: android/setup"`
 >
-> Last distilled: 2026-11-26 (HEAD = e8ac8ebf). D1–D8 were seeded by hand from the retired design doc
+> Last distilled: 2026-11-27 (HEAD = 2f321b12). D1–D8 were seeded by hand from the retired design doc
 > §11.1 and §11.4 and the round records in `docs/rounds/`, so their sources cite rounds; later
 > entries cite commits.
 
@@ -217,6 +217,14 @@
 - **Tradeoffs**: Permanently obstructed paths on an existing store (such as a symlinked `/etc/skel` before `bash-startup-done` exists) are retried and reported on every start until repaired.
 - **Watch out**: Direct callers of individual `ensure*` helpers still fail fast unless they pass `onFailure`, and unreadable one-time markers skip their migration instead of re-seeding user-deleted files.
 - **Source**: 12ac97cf, f7d164db
+
+### D48: Rootfs setup batches operations in one `StoreAccess` session and skips unchanged rewrites
+
+- **What**: `Rootfs` setup helpers run through an internal `StoreAccess` backed by `Native.withStore`, skipping byte-identical overwrites for `/var/cache/appine/doas.apk` and `/usr/local/libexec/appine-open-url` (`writeIfChanged`), skipping `xdg-open.sh` and `appine-gpu.sh` reads/writes when a non-legacy regular file exists, returning `StartPreparation(browserReady, openRcDone)` from `prepareStart`, and reading `/etc/passwd` once in `loginAccount`.
+- **Why**: `Rootfs.prepareStart` previously incurred roughly thirteen exclusive `Store::open` and `fdatasync` cycles per Alpine cold start while unconditionally rewriting unchanged binaries and re-reading launcher assets.
+- **Tradeoffs**: Checking equality reads `doas.apk` and `appine-open-url` on each cold start instead of blindly overwriting them, and `prepareStart` changes its return type from `Boolean` to `StartPreparation`.
+- **Watch out**: Byte-identical files keep their existing mode and owner, and an obstructed `openrc-setup-done` marker returns `openRcDone = false` without reporting a `prepareStart` error so `ensureOpenRc` handles it.
+- **Source**: 641769ab
 
 ## Superseded
 

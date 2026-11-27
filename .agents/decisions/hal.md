@@ -2,7 +2,7 @@
 
 > Snapshot of current consensus. Evolution: `git log --grep="MODULE: hal"`
 >
-> Last distilled: 2026-11-26 (HEAD = 3ad68857). D1–D7 were seeded by hand from the design doc §3 and
+> Last distilled: 2026-11-27 (HEAD = 2f321b12). D1–D7 were seeded by hand from the design doc §3 and
 > the round records in `docs/rounds/`, so their sources cite rounds; later entries cite commits.
 
 ## Active
@@ -148,6 +148,30 @@
 - **Tradeoffs**: Callers enforce host-page alignment and non-destructive advice values rather than relying on per-hint enum wrappers.
 - **Watch out**: Passing destructive advice through `advise` would bypass `discard`/`remove` edge-zeroing and copy-on-write invariants.
 - **Source**: d0945a96
+
+### D22: `Event` uses a hybrid atomic-state futex wait with lazy eventfd fallback
+
+- **What**: `Event` pairs an `AtomicU32` state word (`SIGNALED`, `FUTEX_WAIT`, `FD_WAIT`, `FD_PINNED`, `FD_DIRTY`) with the existing eventfd so `Event::wait` parks via `SYS_futex(FUTEX_WAIT_PRIVATE/WAKE_PRIVATE)`, `Event::poll_with` arms `FD_WAIT` on stack-allocated `pollfd`s, `Event::is_signaled` avoids `ppoll`, `Event::clear` does at most one eventfd read, and `Event::fd` pins `FD_PINNED` for external pollers.
+- **Why**: Looping `read()` until `EAGAIN` in `Event::clear`, calling `ppoll()` in `is_signaled`, and using eventfd plus `ppoll` for no-fd futex/sleep waits wasted host syscalls.
+- **Tradeoffs**: State-bit and eventfd synchronization is more complex, and calling `Event::fd` keeps eventfd writes active for that `Event`.
+- **Watch out**: Preserve `SeqCst` ordering between `Event::signal` and `wait`/`poll_with`/`fd` arming so wakeups cannot be missed across wait modes.
+- **Source**: 8c591916
+
+### D23: Socket I/O avoids unneeded `recvmsg` allocations and exposes vectored stream helpers
+
+- **What**: `appine_hal::net` keeps `recvmsg` as a wrapper over `recvmsg_opt(..., true, ...)`, skips address and control setup when `!need_addr && control_len == 0`, uses a 512-byte stack buffer for `0 < control_len <= 512`, and adds `unsafe sendmsg_iov`/`recvmsg_iov` for direct vectored I/O.
+- **Why**: `recvmsg` previously allocated peer-address and control `Vec`s even when callers needed neither, and stream I/O lacked vectored helpers for direct guest-page transfers.
+- **Tradeoffs**: Expands the public `appine_hal::net` surface by three functions, and control buffers larger than 512 bytes still heap-allocate.
+- **Watch out**: Callers of `sendmsg_iov` and `recvmsg_iov` must guarantee buffer pointer validity for the duration of the nonblocking host syscall.
+- **Source**: 4dd64f02
+
+### D24: `Event::wait` preserves remaining timeout on retries and `poll`/`Event::poll_with` zero caller `revents`
+
+- **What**: `Event::wait` (D22) lazily captures a checked `Instant` deadline before parking on a non-zero timed wait to recompute remaining duration across retries, and both `Event::poll_with` and `poll` zero each caller slot's `revents` while building `pollfd`s before `poll_raw`.
+- **Why**: Re-passing the full relative timeout on `rc == 0`/`EAGAIN` retries extended waits on spurious wakes, and `Event::poll_with` left stale `revents` when `ppoll` returned an error such as `EINTR`.
+- **Tradeoffs**: Timed `Event::wait` calls that park pay one vDSO `Instant::now()` read (none for pre-signaled or infinite waits).
+- **Watch out**: Keep `checked_add` deadline arithmetic so `Duration::MAX` timeouts cannot overflow.
+- **Source**: 2a4010d6
 
 ## Superseded
 

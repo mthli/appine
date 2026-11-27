@@ -2,7 +2,7 @@
 
 > Snapshot of current consensus. Evolution: `git log --grep="MODULE: kernel/netns"`
 >
-> Last distilled: 2026-11-26 (HEAD = e8ac8ebf). D1–D8 were seeded by hand from the retired design doc
+> Last distilled: 2026-11-27 (HEAD = 2f321b12). D1–D8 were seeded by hand from the retired design doc
 > §10 and the round records in `docs/rounds/`, so their sources cite rounds; later entries cite
 > commits.
 
@@ -130,6 +130,15 @@
 - **Watch out**: Per-segment filter re-evaluation remains absent on established forwarded connections.
 - **Source**: 8bd3fa4c
 
+### D18: Namespace `Bindings` indexes ports and IDs and expires linger entries via a FIFO queue
+
+- **What**: Index `Bindings` with `by_id`, insertion-ordered `PortIndex` buckets for guest and host ports, `udp_host_ips` counts for `unique_udp_host_ip`, and an amortized FIFO `released` queue for 10 s linger expiry.
+- **Why**: Linear scans over a flat `Vec<Binding>` made conflict checks, target resolution, and ephemeral port probing `O(N)` per namespace, while every close scanned all lingering entries with `linger.retain`.
+- **Tradeoffs**: Maintains four synchronized index structures inside `Bindings` on every insertion and removal.
+- **Watch out**: Mutating a binding's address, port, or device without updating all four indexes will corrupt conflict checks or lookup priority.
+- **Source**: b38371ff
+
 ## Superseded
 - ~~D9 combined ownership of the newly extracted child modules~~ → replaced by **D9** in 60790c14 (2026-11-15; scope only, inherited implementation decisions remain here)
 - ~~Keeping virtual namespace bind ownership in the initial-namespace port map (kernel/net D11)~~ → replaced by **D6** in 7fad509d (2026-11-25)
+- ~~Flat `Vec<Binding>` linear scans and per-close `linger.retain` (D6 in part, 7fad509d)~~ → replaced by **D18** in b38371ff (2026-11-27)

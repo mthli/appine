@@ -2,7 +2,7 @@
 
 > Snapshot of current consensus. Evolution: `git log --grep="MODULE: kernel/fileio"`
 >
-> Last distilled: 2026-11-26 (HEAD = e8ac8ebf)
+> Last distilled: 2026-11-27 (HEAD = 2f321b12)
 >
 > Decisions on file data I/O made before kernel/fileio was split from kernel/files (and before kernel/files was split from kernel/vfs) keep their parent tags and live in `.agents/decisions/kernel/files.md` (D3, D4 and the truncate-through-fd-link half of D2) and `.agents/decisions/kernel/vfs.md` (D11, D22, D24, D29, D33, D45, the `write_sync` half of D17, the write-path half of D41 and the file I/O halves of D36 and D37).
 
@@ -143,6 +143,30 @@
 - **Tradeoffs**: Adds a targeted match arm in `write_proc` alongside `memory.max`.
 - **Watch out**: Any future direct call to `netdev::conf_write` outside `write_proc` would bypass rtnetlink notifications.
 - **Source**: 8bd3fa4c
+
+### D18: Mapping reconciliation filters open files lazily and single-chunk writes check inode flags once
+
+- **What**: Route `opens_of` through `Kernel::open_files_matching` (skipping `reconcile_mapping` when `MappingObject::reconcile` is false) and deduplicate `file_inode_flags` lookups across write layers via `checked_write_flags` and `prechecked_flags.take()`.
+- **Why**: `reconcile_mapping` scanned every open fd on each regular-file `mmap`, and single-chunk regular-file writes looked up `file_inode_flags` three times.
+- **Tradeoffs**: Internal write helpers thread an extra `Option<u32>` prechecked-flags parameter.
+- **Watch out**: Consume `prechecked_flags` with `.take()` for the first chunk only so later chunks after a BKL release still observe concurrent `IMMUTABLE` or `APPEND` changes.
+- **Source**: b38371ff
+
+### D19: Hot file, copy, splice, and pipe I/O paths reuse a per-thread `IoScratch` buffer
+
+- **What**: Reuse a zero-`unsafe` thread-local `IO_SCRATCH: Cell<Vec<u8>>` through an RAII `IoScratch` guard (retaining up to 64 KiB across syscalls while allocating transiently for larger or re-entrant requests) across the 8 hot read, write, copy, and pipe paths in `syscall/fs.rs`.
+- **Why**: Hot I/O syscalls previously allocated and zero-filled a fresh `Vec<u8>` up to `IO_CHUNK` (64 KiB) on every call.
+- **Tradeoffs**: Each active guest thread retains up to 64 KiB of unzeroed scratch capacity between syscalls.
+- **Watch out**: Every caller must slice strictly to the bytes overwritten in the current operation so prior scratch contents can never leak on short reads or faults.
+- **Source**: a1fe8a19
+
+### D20: Regular-file I/O uses coalesced `PinnedIo` zero-copy spans and hoisted per-chunk checks
+
+- **What**: Coalesce `Mm::for_each_page` over contiguous non-CoW/non-Fill/non-tmpfs VMA spans, perform regular store file reads and writes directly against pinned spans via `PinnedIo` (guarding against concurrent `Mm::fork` lending via `HostRegion::io_write_pins`), and hoist per-chunk write checks with a fast `store.attrs` + `has_file_caps` `remove_privs` skip.
+- **Why**: Regular-file I/O previously copied every 64 KiB chunk through `IoScratch` with per-page `mmu.translate` calls and repeated per-chunk flags, seals, unshare, privilege, and notification checks.
+- **Tradeoffs**: Concurrent forks during an unlocked zero-copy read copy the pinned VMA eagerly instead of CoW-lending, and partial-valid write buffers now write page-granularly rather than in all-or-nothing 64 KiB chunks.
+- **Watch out**: Any new VMA kind needing per-page fault admission or non-contiguous backing must stay excluded from `Mm::for_each_page` coalescing and `Mm::pin_io`, and fork sharing paths must honor `HostRegion::has_io_write_pins()`.
+- **Source**: 7a7cf94e
 
 ## Superseded
 
