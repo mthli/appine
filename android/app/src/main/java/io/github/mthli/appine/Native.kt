@@ -1,8 +1,11 @@
 package io.github.mthli.appine
 
+import android.system.OsConstants
 import java.io.IOException
 import java.util.function.IntConsumer
 import java.util.function.LongConsumer
+
+internal data class PortMapping(val protocol: String, val phonePort: Int, val guestPort: Int)
 
 /**
  * JNI interface of the native library libappine.so, implemented in hosts/android/src/lib.rs.
@@ -254,6 +257,18 @@ internal object Native {
      */
     @JvmStatic
     external fun consoleCwd(machine: Long, console: Int): String?
+
+    /** Live low-port bindings as (IP protocol, phone port, guest port) triples. Takes the BKL. */
+    @JvmStatic
+    private external fun portMappings(machine: Long): LongArray?
+
+    fun readPortMappings(machine: Long): List<PortMapping>? {
+        val rows = portMappings(machine) ?: return null
+        return (rows.indices step 3).map { i ->
+            val protocol = if (rows[i].toInt() == OsConstants.IPPROTO_TCP) "TCP" else "UDP"
+            PortMapping(protocol, phonePort = rows[i + 1].toInt(), guestPort = rows[i + 2].toInt())
+        }
+    }
 
     /**
      * Drains first listens on non-loopback addresses. Each row contains the guest port, host port,

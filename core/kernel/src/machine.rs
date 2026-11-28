@@ -836,6 +836,13 @@ impl Machine {
         })
     }
 
+    /// Live initial-namespace low-port mappings as (IP protocol, host port, guest port).
+    pub fn port_mappings(&self) -> Option<Vec<(i32, u16, u16)>> {
+        crate::bug::host_call("Machine::port_mappings", || {
+            self.shared.lock().portmap.borrow().active()
+        })
+    }
+
     /// Takes the ports the guest first listened on at non-loopback addresses (design doc §12 item
     /// 7): the app posts a notification from them, telling the user which port other devices
     /// should connect to (low ports are mapped elsewhere, [`crate::portmap`]).

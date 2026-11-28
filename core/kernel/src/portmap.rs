@@ -127,6 +127,17 @@ impl PortMap {
         self.entries.get(&(proto, port)).map(|e| e.host)
     }
 
+    /// Live bindings as (protocol, host port, guest port), including binds to the original port.
+    pub fn active(&self) -> Vec<(i32, u16, u16)> {
+        let mut rows: Vec<_> = self
+            .entries
+            .iter()
+            .map(|(&(proto, guest), entry)| (proto, entry.host, guest))
+            .collect();
+        rows.sort_unstable();
+        rows
+    }
+
     /// When a host port comes from a mapping (including just released ones, [`LINGER`]), the port
     /// the guest sees.
     pub fn guest_port(&self, proto: i32, host: u16) -> Option<u16> {
@@ -476,6 +487,22 @@ mod tests {
         .unwrap();
         let (h, _d, _) = bind(&m, UDP, 53, |_| Ok(()), || None).unwrap();
         assert_eq!(h, 20053);
+    }
+
+    #[test]
+    fn active_snapshot_lists_each_live_binding_once() {
+        let m = map();
+        let (_, udp, _) = bind(&m, UDP, 53, refusing(&[]), || None).unwrap();
+        let (_, tcp, _) = bind(&m, TCP, 22, |_| Ok(()), || None).unwrap();
+        let (_, shared, _) = bind(&m, TCP, 22, |_| Ok(()), || None).unwrap();
+        let rows = [(TCP, 22, 22), (UDP, 10053, 53)];
+        assert_eq!(m.borrow().active(), rows);
+        drop(tcp);
+        assert_eq!(m.borrow().active(), rows);
+        drop(shared);
+        assert_eq!(m.borrow().active(), [(UDP, 10053, 53)]);
+        drop(udp);
+        assert!(m.borrow().active().is_empty());
     }
 
     #[test]

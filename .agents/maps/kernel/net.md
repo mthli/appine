@@ -5,7 +5,7 @@
 >
 > Verified: 2026-11-26 (full refresh: 5 research concerns; 18 claims checked by an independent verifier — 18 confirmed, 0 partial, 0 refuted, plus 6 map-audit refinements and 4 additional confirmed bugs folded in)
 >
-> Maintained: 2026-11-28 (targeted verification only since the full mapping; latest change: bind address and interface in listen events)
+> Maintained: 2026-11-28 (targeted verification only since the full mapping; latest change: live low-port binding snapshots)
 
 ## Responsibilities
 
@@ -38,7 +38,7 @@ helpers, netlink section and `Socket::Netlink` arms, and `kernel/rawicmp`’s `r
 - `socket`, `socketpair`, `bind`, `listen`, `connect`, `accept4` (also accept), `shutdown`, name/option
   calls, sendto/sendmsg/sendmmsg and recvfrom/recvmsg/recvmmsg. File operations use
   `syscall::net::{rw,send,recv,ioctl}`. Poll uses `readiness`, `wake_objects`, `arrivals`.
-- `deliver_dns`, `Machine::take_listens`, `Traffic::{account,get}`, `traffic::outgoing_source`,
+- `deliver_dns`, `Machine::{take_listens,port_mappings}`, `Traffic::{account,get}`, `traffic::outgoing_source`,
   `net::{proc_listing,sockstat,proc_snmp,proc_netstat,PROC_ARP}`.
 
 ## Data flow / lifecycle
@@ -330,7 +330,8 @@ the original port. A live key or one released within 120 s fixes the host port. 
 fresh key tries the original unless `always_map`, the other protocol's live host port, guest port plus 1–3
 offsets (distinct, in range), then zero. Only nonzero-candidate `EADDRINUSE` or original-port `EACCES`
 continues. Ephemeral bind reads back the host port. Newly changed mappings are logged. Last lease removes
-the live lookup immediately and permits reverse translation for less than 10 s.
+the live lookup immediately and permits reverse translation for less than 10 s. `PortMap::active` snapshots only live entries,
+sorted by protocol, host port and guest port. Reused bindings appear once, including original-port binds.
 
 `map_dest` rewrites a live mapped port only on loopback, wildcard or a host interface address.
 `unmap_addr` applies the socket's matching local pair. `translate_peer` passes the intact endpoint to

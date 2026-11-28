@@ -1010,6 +1010,19 @@ class TerminalService : Service() {
     /** Takes what there is to tell the user (given to one UI only). */
     fun takeNotice(): String? = notice.also { notice = null }
 
+    /** Reads the current kernel's bindings on the worker and delivers the snapshot on main. */
+    internal fun portMappings(result: (List<PortMapping>?) -> Unit) {
+        val handle = machine
+        if (handle == 0L) {
+            result(null)
+            return
+        }
+        worker.execute {
+            val mappings = Native.readPortMappings(handle)
+            main.post { result(if (machine == handle) mappings else null) }
+        }
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_EXIT_ALL -> exitAll()

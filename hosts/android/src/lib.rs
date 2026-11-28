@@ -1294,6 +1294,27 @@ pub extern "system" fn Java_io_github_mthli_appine_Native_consoleCwd<'l>(
     })
 }
 
+/// Snapshots live low-port bindings as consecutive (IP protocol, host port, guest port) triples.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_mthli_appine_Native_portMappings(
+    env: JNIEnv<'_>,
+    _: JClass<'_>,
+    handle: jlong,
+) -> jlongArray {
+    guarded!("Native.portMappings", std::ptr::null_mut(), {
+        let Some(rows) = machine(handle).and_then(|m| m.port_mappings()) else {
+            return std::ptr::null_mut();
+        };
+        let values: Vec<_> = rows
+            .into_iter()
+            .flat_map(|(proto, host, guest)| {
+                [jlong::from(proto), jlong::from(host), jlong::from(guest)]
+            })
+            .collect();
+        long_array(&env, &values)
+    })
+}
+
 /// Drains first listens as tab-separated guest port, host port, bind IP (or `*` for a dual-stack
 /// wildcard), bound interface index and process name. The final field may contain tabs.
 #[unsafe(no_mangle)]

@@ -55,6 +55,13 @@
     <string name="tab_ended">%1$s (ended)</string>
     <string name="close_tab_description">Close tab %1$d: %2$s</string>
 
+    <!-- Port mappings -->
+    <string name="port_mappings">Port mappings</string>
+    <string name="port_mappings_loading">Reading port mappings…</string>
+    <string name="port_mappings_empty">No active port mappings.</string>
+    <string name="port_mappings_unavailable">Port mappings are unavailable.</string>
+    <string name="port_mapping_row">%1$s · Phone %2$d → Linux %3$d</string>
+
     <!-- Search -->
     <string name="find">Find</string>
     <string name="find_previous">Previous match</string>

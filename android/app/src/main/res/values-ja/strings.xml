@@ -53,6 +53,13 @@
     <string name="tab_ended">%1$s（終了）</string>
     <string name="close_tab_description">タブ%1$dを閉じる：%2$s</string>
 
+    <!-- Port mappings -->
+    <string name="port_mappings">ポートマッピング</string>
+    <string name="port_mappings_loading">ポートマッピングを読み込み中…</string>
+    <string name="port_mappings_empty">現在、ポートマッピングはありません。</string>
+    <string name="port_mappings_unavailable">ポートマッピングを読み込めません。</string>
+    <string name="port_mapping_row">%1$s · 端末 %2$d → Linux %3$d</string>
+
     <!-- Search -->
     <string name="find">検索</string>
     <string name="find_previous">前の一致</string>

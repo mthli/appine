@@ -5,7 +5,7 @@
 >
 > Verified: 2026-11-26 (full refresh: 15 adversarial claims checked by independent verifier — 14 confirmed, 1 partial corrected below, 0 refuted; precision fixes and confirmed bugs/debts recorded)
 >
-> Maintained: 2026-11-28 (targeted verification only since the full mapping; latest change: listen records carry socket binding details)
+> Maintained: 2026-11-28 (targeted verification only since the full mapping; latest change: typed low-port binding snapshots)
 
 ## Responsibilities
 
@@ -69,6 +69,7 @@ Paths encode percent signs, control characters and invalid UTF-8 bytes as `%XX`.
 | `closeConsole(machine: Long, console: Int)` | Hang up the console and ignore the kernel result. |
 | `waitFor(machine: Long, pid: Int): Int` | Wait for a spawned process. Return exit code or negated signal. |
 | `consoleCwd(machine: Long, console: Int): String?` | Foreground group cwd with UTF-8 replacement, or null. |
+| `readPortMappings(machine: Long): List<PortMapping>?` | Decode the private JNI snapshot of live initial-namespace bindings into protocol, phone port and guest port fields. An empty list means no bindings. Null means unavailable. |
 | `trimMemory(machine: Long)` | Trim pooled DBT translations, shared file mappings and VFS caches, then sync. |
 | `shutdown(machine: Long)` | Run orderly poweroff, then unregister. |
 | `stop(machine: Long)` | Unregister, then force all guest processes to exit. |

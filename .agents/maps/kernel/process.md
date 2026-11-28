@@ -4,6 +4,8 @@
 > See `.agents/decisions/kernel/process.md` for the paired decision history (also holds pre-split decisions on execve, namespaces, futexes, time, boot, and bug containment / BKL watchdog).
 >
 > Verified: 2026-11-27 (full mapping: 5 concerns; 17 claims checked by 1 independent verifier — 13 confirmed, 4 partial, 0 refuted, all patched; 3 confirmed bugs recorded)
+>
+> Maintained: 2026-11-28 (targeted verification only since the full mapping; latest change: host access to live port mappings)
 
 ## Responsibilities
 
@@ -96,7 +98,7 @@ process-wide calls (excluding `kernel/time`, `kernel/boot`, `kernel/signal`, `ke
   `request_wake*`, `signal_later`/`flush_signals`, `syscall::{dispatch, copy_result,
   retry_user_pages, tl_sweep}`.
 - Host `Machine`: `processes`, `cpu_time_ns`, `rootfs_stats`, `dbt_stats`, `signal`,
-  `wait`/`try_wait`/`wait_or_power`, `set_routes`, `trim_memory`, `sync`, `take_listens`,
+  `wait`/`try_wait`/`wait_or_power`, `set_routes`, `trim_memory`, `sync`, `port_mappings`, `take_listens`,
   `take_changed_dirs`, console ops (`open`/`read`/`read_run*`/`write`/`resize`/`close`/
   `foreground*`/`cwd`/`password_input`), crate-internal `store_changed` and `truncate_host_object`.
 - Sysctls/procfs: `threads-max`, `pid_max`, `ns_last_pid`, `/proc/<pid>/task/<tid>/children`.

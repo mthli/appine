@@ -4,6 +4,8 @@
 > See `.agents/decisions/android/terminal.md` for the paired decision history (it still holds the pre-split decisions for `android/vt`, `android/vtcore`, `android/vtview`, `android/vtgestures`, `android/vtrender`, `android/privacy`, `android/licenses`, `android/tabbar`, `android/keys` and `android/file-import`).
 >
 > Verified: 2026-11-26 (full refresh: 18 adversarial claims checked independently — 17 confirmed and 1 partial corrected, plus 5 confirmed bugs/debt items recorded below)
+>
+> Maintained: 2026-11-28 (targeted verification only since the full mapping; latest change: the port mappings dialog)
 
 ## Responsibilities
 
@@ -80,7 +82,7 @@ Opening the title list requires an unlocked activity and a nonempty session snap
 
 Back, Escape, the list toggle and an outside tap dismiss the list. Normal tab selection, search, the menu, bar close/import, extra-key dispatch, pause, restart and disabling the list control can also close it. Escape's matching release is consumed.
 
-The overflow uses an end-aligned AppCompat `PopupMenu` styled with `Widget.Appine.MorePopup`. Find requires a current tab. Reset requires a native terminal, and Clear screen additionally requires the primary screen. Close other/all tabs capture the respective session sets when the menu opens. Settings opens `android/settings`' `SettingsActivity`.
+The overflow uses an end-aligned AppCompat `PopupMenu` styled with `Widget.Appine.MorePopup`. Find requires a current tab. Reset requires a native terminal, and Clear screen additionally requires the primary screen. Close other/all tabs capture the respective session sets when the menu opens. Port mappings opens a private, scrollable dialog with a fresh service snapshot. Each row shows the protocol, phone port and guest port. Empty and unavailable results have distinct messages. Stop and kernel restart dismiss the dialog. Settings opens `android/settings`' `SettingsActivity`.
 
 Keep screen on is checkable even without a tab. `ThemeOverlay.Appine.CheckPopup` makes the checkbox background transparent, leaving press feedback to the row. Tapping updates the check, sets or clears `FLAG_KEEP_SCREEN_ON` and stores `keep_screen_on` in activity-private preferences (default off). Only the visible terminal window requests this behavior. The service's screen-off policy and wake lock are independent.
 

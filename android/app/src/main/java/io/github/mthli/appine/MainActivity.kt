@@ -54,6 +54,7 @@ class MainActivity : FragmentActivity(), TerminalService.Listener, Privacy.Liste
     private val links = TerminalLinks(this, ::showToast)
     private val files by lazy { ViewModelProvider(this)[TerminalFiles::class.java] }
     private var importDialog: AlertDialog? = null
+    private var portMappingsDialog: AlertDialog? = null
     private val pickFiles = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         files.selected(uris)
     }
@@ -197,6 +198,7 @@ class MainActivity : FragmentActivity(), TerminalService.Listener, Privacy.Liste
     }
 
     override fun onStop() {
+        portMappingsDialog?.dismiss()
         dismissClipboardQuestion()
         service?.removeListener(this)
         unbindService(connection)
@@ -350,6 +352,7 @@ class MainActivity : FragmentActivity(), TerminalService.Listener, Privacy.Liste
     }
 
     override fun onRestarting() {
+        portMappingsDialog?.dismiss()
         closeTabList()
         closeSearch()
         current = null
@@ -555,7 +558,7 @@ class MainActivity : FragmentActivity(), TerminalService.Listener, Privacy.Liste
      * `⋮`: finding text in the current tab (none: disabled), clearing its screen (also disabled on
      * the alternate screen, where Ghostty's clear_screen does nothing) or resetting its terminal
      * (disabled before its shell starts), closing the other tabs (none other: disabled) or all of
-     * them, keeping the screen on, and Settings.
+     * them, keeping the screen on, current port mappings, and Settings.
      */
     private fun showMenu(anchor: View) {
         closeTabList()
@@ -594,11 +597,38 @@ class MainActivity : FragmentActivity(), TerminalService.Listener, Privacy.Liste
                 getPreferences(MODE_PRIVATE).edit { putBoolean(PREF_KEEP_SCREEN_ON, keepScreenOn) }
                 true
             }
+            menu.add(R.string.port_mappings).setOnMenuItemClickListener {
+                showPortMappings()
+                true
+            }
             menu.add(R.string.menu_settings).setOnMenuItemClickListener {
                 startActivity(Intent(this@MainActivity, SettingsActivity::class.java))
                 true
             }
             show()
+        }
+    }
+
+    private fun showPortMappings() {
+        if (Privacy.locked(this)) return
+        val boundService = service
+        val dialog = MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.port_mappings)
+            .setMessage(if (boundService == null) R.string.port_mappings_unavailable else R.string.port_mappings_loading)
+            .setPositiveButton(R.string.close, null)
+            .setOnDismissListener { if (portMappingsDialog === it) portMappingsDialog = null }
+            .showPrivate()
+        portMappingsDialog = dialog
+        boundService?.portMappings { mappings ->
+            if (!dialog.isShowing) return@portMappings
+            val message = when {
+                mappings == null || service !== boundService -> getString(R.string.port_mappings_unavailable)
+                mappings.isEmpty() -> getString(R.string.port_mappings_empty)
+                else -> mappings.joinToString("\n") { mapping ->
+                    getString(R.string.port_mapping_row, mapping.protocol, mapping.phonePort, mapping.guestPort)
+                }
+            }
+            dialog.setMessage(message)
         }
     }
 
