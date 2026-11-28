@@ -17,7 +17,8 @@
 # submitted command before execution; for ash (which has no preexec hook) and unmarked shells, the
 # terminal falls back to the console's foreground command when a program sets no title. A program
 # can replace the title with OSC 0/2 until the next prompt. Control characters in paths and
-# commands are replaced by ?.
+# commands are replaced by ?. At each primary prompt bash appends new history entries to HISTFILE
+# so completed commands survive an Android force-stop.
 if [ -z "${__appine_profile_seen-}" ]; then
     __appine_profile_seen=1
     cat /etc/motd 2>/dev/null

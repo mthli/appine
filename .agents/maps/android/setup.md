@@ -5,7 +5,7 @@
 >
 > Verified: 2026-11-26 (full mapping, 15 claims independently checked across package verification, store publication, per-start setup, OpenRC, account selection and shell integration)
 >
-> Maintained: 2026-11-28 (targeted verification only since the full mapping; latest change: guest inspection and atomic replacement of package source presets from Settings)
+> Maintained: 2026-11-28 (targeted verification only since the full mapping; latest change: Bash history persistence across forced stops)
 
 ## Responsibilities
 
@@ -219,13 +219,16 @@ logins happen, and the `settings` preferences (`android/service`); the import an
   until the next primary prompt restores `$PWD`. Bash appends `$(__appine_preexec)` to `PS0` once,
   snapshots `HISTCMD` at each prompt, and reads `history 1` without timestamp only when history is
   enabled and `HISTCMD` advanced (else reports `bash`, e.g. ignored duplicate/space-prefixed/
-  `HISTIGNORE`/disabled history), without a `DEBUG` trap or history setting changes; zsh uses preexec's
+  `HISTIGNORE`/disabled history), without a `DEBUG` trap; zsh uses preexec's
   command arg directly. Tab bar still shows numbers (titles appear via long press / TalkBack). Existing
   shells keep loaded hooks until restarted or full profile reloaded; sourcing `ashrc` alone into an
   already-marked old PS1 skips its guard.
 - For `android/vtcore` shell integration, login shells mark prompts with OSC 133:
   - bash: profile sets coloured PS1 and reads `appine.bashrc`, putting `__appine_prompt` first in
-    `PROMPT_COMMAND` (scalar or bash 5.1+ array, once per load). Before each prompt it emits D with
+    `PROMPT_COMMAND` (scalar or bash 5.1+ array, once per load). Interactive shells enable `histappend`
+    so tabs append on exit. At each primary prompt `history -a` appends the session's new entries
+    when history is enabled, `HISTFILE` is nonempty and `HISTFILESIZE` is not zero. A new shell can
+    recall those entries after a force-stop. Before each prompt the hook emits D with
     exit status and A (`redraw=last;cl=line`) on a fresh line, wraps PS1 (P `k=i`, `k=c` after `\n`
     escapes and command-substitution-free literal newlines, … B) and PS2 (`k=s`), and appends C to
     `PS0` whenever missing (re-wrapping PS1 set later by `~/.bashrc`; plain `PROMPT_COMMAND`

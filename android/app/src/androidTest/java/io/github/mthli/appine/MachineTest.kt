@@ -443,6 +443,19 @@ class MachineTest {
         }
     }
 
+    @Test
+    fun bashRecallsHistoryAfterForcedStop() = withAlpineStore("store-bash-history") { store ->
+        withMachine(store) { machine ->
+            // Keep the kill itself out of history so Up recalls the completed command.
+            val output = login(machine, "HISTCONTROL=ignorespace\nprintf 'history-%s\\n' recalled\n kill -KILL \$\$\n")
+            assertTrue(output, "\nhistory-recalled\n" in plain(output))
+        }
+        withMachine(store) { machine ->
+            val output = plain(login(machine, "\u001b[A\nexit\n"))
+            assertTrue(output, "\nhistory-recalled\n" in output)
+        }
+    }
+
     /**
      * A system imported from Alpine logs in with bash (the android/setup map): root's shell is
      * /bin/bash, and while the packages the app bundles are missing (moved away here) the login

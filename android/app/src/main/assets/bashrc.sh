@@ -6,6 +6,8 @@
 # /etc/bash.bashrc (Debian), so a nested bash (bash, su without -l) is marked too, with its own
 # prompt. Reading it again changes nothing.
 if [ -n "${BASH_VERSION-}" ]; then
+    # A tab exiting normally must also append, so it keeps history saved by other tabs.
+    if [[ $- == *i* ]]; then builtin shopt -s histappend; fi
     # PS0 runs once per submitted command, before its redirections or pipelines. History can
     # exclude commands (or be disabled); never use an older entry as the current title.
     __appine_preexec() {
@@ -24,6 +26,10 @@ if [ -n "${BASH_VERSION-}" ]; then
     # from the next prompt on
     __appine_prompt() {
         local status=$?
+        # A force-stop skips bash's exit-time save. Flush accepted history before showing PS1.
+        if [[ -o history && -n ${HISTFILE-} && ${HISTFILESIZE-} != 0 ]]; then
+            builtin history -a || :
+        fi
         printf '\033]133;D;%s\007\033]133;A;redraw=last;cl=line\007' "$status"
         # Restore the directory after a program's title, without letting path controls end OSC.
         printf '\033]2;%s\007' "${PWD//[[:cntrl:]]/?}"

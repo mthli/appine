@@ -5,7 +5,7 @@
 >
 > Verified: 2026-11-15 (split out of the android/native full mapping of 2026-11-10; the boundary was checked against the source at the split)
 >
-> Maintained: 2026-11-28 (targeted verification only since the full mapping; latest change: live package source selection and stale-selection coverage)
+> Maintained: 2026-11-28 (targeted verification only since the full mapping; latest change: Bash history recall after an abrupt shell exit)
 
 ## Responsibilities
 
@@ -119,7 +119,8 @@ debug variant, manifest and network-security configuration belong to `android/bu
   new Alpine import logging in with bash (`newSystemsLogInWithBash`, its own store: the offline
   install, the `/bin/sh` fallback, bash's marks and nested shells', root and `adduser`-copied
   `.bash_profile`/`.bashrc` loading and ownership, and non-interactive `bash -lc` skipping
-  `.bashrc`), and one-time Alpine bash startup seeding (`existingAlpineStoresSeedBashStartupFilesOnce`:
+  `.bashrc`), history recall with Up after killing Bash and restarting the guest machine in an
+  isolated store, and one-time Alpine bash startup seeding (`existingAlpineStoresSeedBashStartupFilesOnce`:
   existing root and regular-account `.bashrc` preservation, account ownership and login loading,
   missing-home safety, deletion persistence, symlinked `.profile` non-shadowing, and `/bin/sh`
   accounts/stores). `newSystemsInstallProcpsOffline`
