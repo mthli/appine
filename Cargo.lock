@@ -10,7 +10,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "appine-android"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "appine-kernel",
  "cc",
@@ -20,11 +20,11 @@ dependencies = [
 
 [[package]]
 name = "appine-bench"
-version = "1.1.0"
+version = "1.2.0"
 
 [[package]]
 name = "appine-engine"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "cc",
  "libc",
@@ -32,14 +32,14 @@ dependencies = [
 
 [[package]]
 name = "appine-hal"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "appine-kernel"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "appine-engine",
  "appine-hal",
@@ -51,7 +51,7 @@ dependencies = [
 
 [[package]]
 name = "appine-lockstep"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "appine-engine",
  "cc",
@@ -59,7 +59,7 @@ dependencies = [
 
 [[package]]
 name = "appine-run"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "appine-bench",
  "appine-hal",
