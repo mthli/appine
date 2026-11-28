@@ -5,7 +5,7 @@
 >
 > Verified: 2026-11-15 (split out of the android/native full mapping of 2026-11-10; the boundary was checked against the source at the split)
 >
-> Maintained: 2026-11-28 (targeted verification only since the full mapping; latest change: listen address selection and clipboard action routing)
+> Maintained: 2026-11-28 (targeted verification only since the full mapping; latest change: live package source selection and stale-selection coverage)
 
 ## Responsibilities
 
@@ -109,7 +109,9 @@ debug variant, manifest and network-security configuration belong to `android/bu
   homes and `rootsChanged` cache invalidation, writes,
   changes both ways, persisted grant selection and stale descendant IDs through direct and symlink paths after deleting and recreating a directory),
   import-time mirror selection (partial results, ties, official fallback, guest edits and deletion;
-  both Debian source URIs in the network-enabled test), verified, resumed and cancelled downloads (`file:` URLs and a local server), routes, low
+  both Debian source URIs in the network-enabled test), manual preset changes on a running system
+  (exact matches, stale selections, custom contents, symlinks, deleted files and both Debian URIs),
+  verified, resumed and cancelled downloads (`file:` URLs and a local server), routes, low
   ports, bugs injected through the test hooks killing only the guest process on both tiers, kill
   reports (including an OOM from a cgroup `memory.max`), a guest crash reaching the kernel log, and
   prompt marks (busybox ash's with root's shell set to `/bin/sh`, including the raw visible

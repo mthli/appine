@@ -8,9 +8,10 @@ import android.system.OsConstants
 import android.util.Log
 import androidx.core.content.edit
 import io.github.mthli.appine.Rootfs.BASH_HOOK
+import io.github.mthli.appine.Rootfs.DEBIAN_BASH_HOOK
 import io.github.mthli.appine.Rootfs.RESUMES
 import io.github.mthli.appine.Rootfs.UNMARKED_PROFILE
-import io.github.mthli.appine.Rootfs.configure
+import io.github.mthli.appine.Rootfs.ensureShellRcHooks
 import io.github.mthli.appine.Rootfs.fetch
 import io.github.mthli.appine.Rootfs.writeProfile
 import java.io.File
@@ -42,6 +43,13 @@ internal object Rootfs {
      */
     data class Download(val urls: List<String>, val sha256: String, val size: Long)
 
+    enum class Mirror(val label: Int, val alpineHost: String, val debianHost: String = alpineHost) {
+        OFFICIAL(R.string.mirror_official, "dl-cdn.alpinelinux.org", "deb.debian.org"),
+        TUNA(R.string.mirror_tuna, "mirrors.tuna.tsinghua.edu.cn"),
+        USTC(R.string.mirror_ustc, "mirrors.ustc.edu.cn"),
+        ALIYUN(R.string.mirror_aliyun, "mirrors.aliyun.com"),
+    }
+
     /**
      * The distros to choose from. `mirrors` is the built-in mirror list (the first one, the
      * official one, is used when probing fails), and `probe` is the file whose beginning is
@@ -50,18 +58,13 @@ internal object Rootfs {
     enum class Distro(
         val label: String,
         val download: Download?,
-        val mirrors: List<String>,
+        val sourcesPath: String,
         val probe: String,
     ) {
         ALPINE(
             "Alpine Linux ${BuildConfig.ALPINE_BRANCH.removePrefix("v")}",
             null,
-            listOf(
-                "https://dl-cdn.alpinelinux.org/alpine",
-                "https://mirrors.tuna.tsinghua.edu.cn/alpine",
-                "https://mirrors.ustc.edu.cn/alpine",
-                "https://mirrors.aliyun.com/alpine",
-            ),
+            "/etc/apk/repositories",
             "${BuildConfig.ALPINE_BRANCH}/main/aarch64/APKINDEX.tar.gz",
         ),
 
@@ -80,14 +83,14 @@ internal object Rootfs {
                 "dfb68c024d5cdf4872bb7f0be8d63874aa6d0b7a0050f1b06169573e34ea543a",
                 49_776_179,
             ),
-            listOf(
-                "deb.debian.org",
-                "mirrors.tuna.tsinghua.edu.cn",
-                "mirrors.ustc.edu.cn",
-                "mirrors.aliyun.com",
-            ),
+            "/etc/apt/sources.list.d/debian.sources",
             "debian/dists/trixie/InRelease",
-        ),
+        );
+
+        fun address(mirror: Mirror): String =
+            if (this == ALPINE) "https://${mirror.alpineHost}/alpine" else mirror.debianHost
+
+        val mirrors: List<String> get() = Mirror.entries.map(::address)
     }
 
     /** Thrown when a download is aborted ([download]'s `cancelled` returns true). */
@@ -214,8 +217,8 @@ internal object Rootfs {
             Native.importRootfs(tmp.path, tarball.path)
             withStore(tmp.path) { access ->
                 configure(context, access, distro)
-                val (path, content) = sources(distro, selectMirror(distro, probes))
-                write(access, path, content)
+                val mirror = selectMirror(distro, probes)
+                write(access, distro.sourcesPath, distro.sources(mirror))
             }
         } finally {
             probes.values.forEach { it.cancel(true) }
@@ -285,27 +288,106 @@ internal object Rootfs {
         )
     }
 
-    /** The package manager's sources: which file they are written in and what the content is. */
-    private fun sources(distro: Distro, mirror: String): Pair<String, String> = when (distro) {
-        Distro.ALPINE -> "/etc/apk/repositories" to
-            "$mirror/${BuildConfig.ALPINE_BRANCH}/main\n$mirror/${BuildConfig.ALPINE_BRANCH}/community\n"
-        // The rootfs has no ca-certificates, so apt uses http (the packages are signed)
-        Distro.DEBIAN -> "/etc/apt/sources.list.d/debian.sources" to
-            """
-            Types: deb
-            URIs: http://$mirror/debian
-            Suites: trixie trixie-updates
-            Components: main
-            Signed-By: /usr/share/keyrings/debian-archive-keyring.pgp
+    /** The complete package source preset shared by import and Settings. */
+    private fun Distro.sources(mirror: Mirror): String {
+        val address = address(mirror)
+        return when (this) {
+            Distro.ALPINE ->
+                "$address/${BuildConfig.ALPINE_BRANCH}/main\n$address/${BuildConfig.ALPINE_BRANCH}/community\n"
+            // The rootfs has no ca-certificates, so apt uses http (the packages are signed)
+            Distro.DEBIAN ->
+                """
+                Types: deb
+                URIs: http://$address/debian
+                Suites: trixie trixie-updates
+                Components: main
+                Signed-By: /usr/share/keyrings/debian-archive-keyring.pgp
 
-            Types: deb
-            URIs: http://$mirror/debian-security
-            Suites: trixie-security
-            Components: main
-            Signed-By: /usr/share/keyrings/debian-archive-keyring.pgp
+                Types: deb
+                URIs: http://$address/debian-security
+                Suites: trixie-security
+                Components: main
+                Signed-By: /usr/share/keyrings/debian-archive-keyring.pgp
 
-            """.trimIndent()
+                """.trimIndent()
+        }
     }
+
+    data class PackageSources(val mirror: Mirror?, val fingerprint: String)
+
+    /** Use the same guest path for inspection and publication, including any guest mounts. */
+    fun packageSources(machine: Long, distro: Distro): PackageSources {
+        val fingerprint = sourceFingerprint(machine, distro.sourcesPath)
+        val mirror = Mirror.entries.firstOrNull {
+            val content = distro.sources(it).toByteArray()
+            hex(MessageDigest.getInstance("SHA-256").digest(content)) == fingerprint
+        }
+        return PackageSources(mirror, fingerprint)
+    }
+
+    private fun sourceFingerprint(machine: Long, path: String): String {
+        val console = Native.openConsole(machine, 1, 100)
+        return try {
+            val argv = arrayOf("sh", "-c", SOURCE_FINGERPRINT + "\nfingerprint \"\$1\"", "appine-mirror", path)
+            val pid = Native.spawn(machine, console, "/bin/sh", argv, ConsolePty.ENVIRONMENT)
+            val output = StringBuilder()
+            val buf = ByteArray(128)
+            while (true) {
+                val n = Native.read(machine, console, buf)
+                if (n <= 0) break
+                if (output.length < 128) output.append(buf.decodeToString(0, n))
+            }
+            if (Native.waitFor(machine, pid) != 0) throw IOException("Cannot inspect package sources")
+            output.toString().trim()
+        } finally {
+            Native.closeConsole(machine, console)
+        }
+    }
+
+    // A symlink is custom even if its target contains a preset. A confirmed replacement changes
+    // the directory entry itself and leaves the target file alone.
+    private val SOURCE_FINGERPRINT = $$"""
+        fingerprint() {
+            if [ -L "$1" ]; then
+                link=$(readlink "$1") || return 1
+                sum=$(printf '%s' "$link" | sha256sum) || return 1
+                printf 'link:%s\n' "${sum%% *}"
+            elif [ -f "$1" ]; then
+                sum=$(sha256sum < "$1") || return 1
+                printf '%s\n' "${sum%% *}"
+            elif [ ! -e "$1" ]; then
+                echo missing
+            else
+                return 1
+            fi
+        }
+    """.trimIndent()
+
+    /** Publish through the running kernel so package readers see one complete file. */
+    fun applyMirror(machine: Long, distro: Distro, mirror: Mirror, previous: PackageSources): Boolean {
+        val argv = arrayOf(
+            "sh", "-c", APPLY_MIRROR, "appine-mirror", distro.sourcesPath,
+            distro.sources(mirror), previous.fingerprint,
+        )
+        val pid = Native.spawn(machine, -1, "/bin/sh", argv, ConsolePty.ENVIRONMENT)
+        return when (val status = Native.waitFor(machine, pid)) {
+            0 -> true
+            3 -> false // The file changed since the picker or confirmation was shown.
+            else -> throw IOException("Cannot apply package source preset (exit $status)")
+        }
+    }
+
+    private val APPLY_MIRROR = SOURCE_FINGERPRINT + "\n" + $$"""
+        set -eu
+        path=$1
+        tmp=$(mktemp "${1%/*}/.appine-mirror.XXXXXX")
+        trap 'rm -f "$tmp"' EXIT
+        printf '%s' "$2" > "$tmp"
+        chmod 644 "$tmp"
+        current=$(fingerprint "$path")
+        [ "$current" = "$3" ] || exit 3
+        mv -fT "$tmp" "$path"
+    """.trimIndent()
 
     /** Copies a bundle from the APK to the guest's package cache. */
     @Throws(IOException::class)
@@ -703,22 +785,23 @@ esac
     }
 
     /** Only completed measurements count. Distro order breaks ties and puts the official fallback first. */
-    private fun selectMirror(distro: Distro, probes: Map<String, Future<Double?>>): String {
+    private fun selectMirror(distro: Distro, probes: Map<String, Future<Double?>>): Mirror {
         val speeds = probes.filterValues { it.isDone }.mapValues { (_, result) ->
             runCatching { result.get() }.getOrNull()
         }
-        val mirror = distro.mirrors.maxBy { speeds[it] ?: -1.0 }
-        if (probes.isNotEmpty()) Log.i(TAG, "mirror speeds at import: $speeds, using $mirror")
+        val mirror = Mirror.entries.maxBy { speeds[distro.address(it)] ?: -1.0 }
+        if (probes.isNotEmpty()) Log.i(TAG, "mirror speeds at import: $speeds, using ${distro.address(mirror)}")
         return mirror
     }
 
     /** Starts throughput probes for an import. Debian lists host names and probes them over HTTPS. */
     fun probeMirrors(distro: Distro): Map<String, Future<Double?>> {
-        val urls = distro.mirrors.map { mirror ->
+        val mirrors = distro.mirrors
+        val urls = mirrors.map { mirror ->
             val base = if (distro == Distro.ALPINE) mirror else "https://$mirror"
             "$base/${distro.probe}"
         }
-        return distro.mirrors.zip(startProbes(urls)).toMap()
+        return mirrors.zip(startProbes(urls)).toMap()
     }
 
     /**

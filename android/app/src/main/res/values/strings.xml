@@ -137,6 +137,18 @@
     <string name="download_failed">Cannot download %1$s: %2$s</string>
     <string name="switch_failed">Cannot prepare %1$s: %2$s\n\nUsing %3$s instead.</string>
 
+    <string name="settings_package_source">Package source</string>
+    <string name="mirror_official">Official mirror</string>
+    <string name="mirror_tuna">Tsinghua TUNA</string>
+    <string name="mirror_ustc">USTC</string>
+    <string name="mirror_aliyun">Aliyun</string>
+    <string name="mirror_custom">Custom configuration</string>
+    <string name="mirror_read_failed">Could not read the package source. Tap to retry.</string>
+    <string name="mirror_replace">Replace custom configuration?</string>
+    <string name="mirror_replace_message">Replace %1$s with the %2$s preset?</string>
+    <string name="mirror_changed">The configuration changed. Select a source again.</string>
+    <string name="mirror_write_failed">Could not write the package source.</string>
+
     <string name="settings_reset">Reset rootfs</string>
     <string name="reset_summary">Delete all files and reinitialize the rootfs</string>
     <string name="reset_title">Reset the rootfs?</string>

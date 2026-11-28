@@ -135,6 +135,18 @@
     <string name="download_failed">無法下載 %1$s：%2$s</string>
     <string name="switch_failed">無法準備 %1$s：%2$s\n\n改用 %3$s。</string>
 
+    <string name="settings_package_source">軟體來源</string>
+    <string name="mirror_official">官方來源</string>
+    <string name="mirror_tuna">清華 TUNA</string>
+    <string name="mirror_ustc">中國科大</string>
+    <string name="mirror_aliyun">阿里雲</string>
+    <string name="mirror_custom">自訂設定</string>
+    <string name="mirror_read_failed">無法讀取軟體來源，輕觸以重試</string>
+    <string name="mirror_replace">取代自訂設定？</string>
+    <string name="mirror_replace_message">要以「%2$s」的預設設定取代 %1$s 嗎？</string>
+    <string name="mirror_changed">設定已變更，請重新選擇軟體來源。</string>
+    <string name="mirror_write_failed">無法寫入軟體來源設定。</string>
+
     <string name="settings_reset">重設 rootfs</string>
     <string name="reset_summary">刪除所有檔案並重新初始化 rootfs</string>
     <string name="reset_title">重設 rootfs？</string>

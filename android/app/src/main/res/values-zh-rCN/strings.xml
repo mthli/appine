@@ -135,6 +135,18 @@
     <string name="download_failed">无法下载 %1$s：%2$s</string>
     <string name="switch_failed">无法准备 %1$s：%2$s\n\n已改用 %3$s。</string>
 
+    <string name="settings_package_source">软件源</string>
+    <string name="mirror_official">官方源</string>
+    <string name="mirror_tuna">清华 TUNA</string>
+    <string name="mirror_ustc">中科大</string>
+    <string name="mirror_aliyun">阿里云</string>
+    <string name="mirror_custom">自定义配置</string>
+    <string name="mirror_read_failed">无法读取软件源，点按重试</string>
+    <string name="mirror_replace">替换自定义配置？</string>
+    <string name="mirror_replace_message">用「%2$s」的预设配置替换 %1$s？</string>
+    <string name="mirror_changed">配置已更改，请重新选择软件源。</string>
+    <string name="mirror_write_failed">无法写入软件源配置。</string>
+
     <string name="settings_reset">重置 rootfs</string>
     <string name="reset_summary">删除所有文件并重新初始化 rootfs</string>
     <string name="reset_title">重置 rootfs？</string>

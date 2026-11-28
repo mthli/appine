@@ -36,6 +36,7 @@ import com.google.android.material.color.DynamicColors
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import java.io.File
 import java.io.IOException
+import java.util.concurrent.Executors
 import kotlin.concurrent.thread
 
 /** Material 3 frame for the standard AndroidX settings list. */
@@ -87,6 +88,10 @@ class SettingsFragment : PreferenceFragmentCompat(), TerminalService.Listener {
     private var service: TerminalService? = null
     private var insetsApplied = false
     private lateinit var distro: Preference
+    private lateinit var packageSource: Preference
+    private var sourceRequest = 0
+    private var sourceBusy = false
+    private var sourceLabel: Int? = null
     private lateinit var reset: Preference
     private lateinit var account: ListPreference
 
@@ -137,6 +142,7 @@ class SettingsFragment : PreferenceFragmentCompat(), TerminalService.Listener {
             render()
             onNotice()
             loadAccounts()
+            updateSources()
         }
 
         override fun onServiceDisconnected(name: ComponentName) {
@@ -148,6 +154,7 @@ class SettingsFragment : PreferenceFragmentCompat(), TerminalService.Listener {
     override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
         preferenceScreen = preferenceManager.createPreferenceScreen(requireContext())
         distro = action(R.string.settings_distro) { onDistro() }
+        packageSource = action(R.string.settings_package_source) { updateSources(openPicker = true) }
         reset = action(R.string.settings_reset) { onReset() }
         account = choice(R.string.settings_login) { s, value ->
             s.setLogin(value)
@@ -224,7 +231,7 @@ class SettingsFragment : PreferenceFragmentCompat(), TerminalService.Listener {
             summary = "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})"
         }
 
-        group(R.string.settings_group_system, distro, account, reset)
+        group(R.string.settings_group_system, distro, packageSource, account, reset)
         group(R.string.settings_group_android, notifications, batteryUsage, runPolicy, privacy, fileAccess)
         group(R.string.settings_group_terminal, fillWide, cursorStyle, cursorBlink, tabList, volumeKeys)
         group(R.string.settings_group_debug, tier, gpu, export)
@@ -294,6 +301,9 @@ class SettingsFragment : PreferenceFragmentCompat(), TerminalService.Listener {
         requireContext().unbindService(connection)
         service = null
         accountLoad++
+        sourceRequest++
+        sourceLabel = null
+        sourceBusy = false
         render()
         super.onStop()
     }
@@ -476,6 +486,7 @@ class SettingsFragment : PreferenceFragmentCompat(), TerminalService.Listener {
     override fun onMachineReady(error: String?) {
         render()
         loadAccounts()
+        updateSources()
     }
 
     override fun onSettingsChanged() = render()
@@ -499,7 +510,7 @@ class SettingsFragment : PreferenceFragmentCompat(), TerminalService.Listener {
     private fun render() {
         val s = service
         if (s == null) {
-            for (row in listOf(distro, reset, account, tier, gpu, runPolicy, fileAccess, privacy,
+            for (row in listOf(distro, packageSource, reset, account, tier, gpu, runPolicy, fileAccess, privacy,
                 fillWide, cursorStyle, cursorBlink, volumeKeys, tabList)) row.isEnabled = false
             return
         }
@@ -515,6 +526,11 @@ class SettingsFragment : PreferenceFragmentCompat(), TerminalService.Listener {
             },
             sw != null || s.canSwitch,
         )
+        val sourceSummary = when (val label = sourceLabel) {
+            null -> if (sourceBusy || !idle) "" else getString(R.string.mirror_read_failed)
+            else -> getString(label)
+        }
+        packageSource.set(sourceSummary, idle && !sourceBusy)
         // Reset is possible even when the start failed: it is the only way to recover a broken
         // store
         reset.set(getString(R.string.reset_summary), s.canSwitch)
@@ -603,6 +619,73 @@ class SettingsFragment : PreferenceFragmentCompat(), TerminalService.Listener {
             .setMessage(R.string.file_access_message)
             .setPositiveButton(R.string.file_access_enable) { _, _ -> service?.setFileAccess(true) }
             .setNegativeButton(android.R.string.cancel, null)
+            .showPrivate()
+    }
+
+    /** Serialize reads and selections across recreated pages, and ignore callbacks from old bindings. */
+    private fun updateSources(openPicker: Boolean = false, apply: (() -> Boolean)? = null) {
+        val s = service ?: return
+        val machine = s.machine
+        if (machine == 0L || s.switching != null) return
+        val context = requireContext().applicationContext
+        val installed = Rootfs.installed(context) ?: return
+        val activity = requireActivity()
+        val request = ++sourceRequest
+        sourceBusy = true
+        render()
+        sourceWorker.execute {
+            val notice = try {
+                if (apply?.invoke() == false) R.string.mirror_changed else null
+            } catch (_: IOException) {
+                R.string.mirror_write_failed
+            }
+            val current = try {
+                Rootfs.packageSources(machine, installed)
+            } catch (_: IOException) {
+                null
+            }
+            activity.runOnUiThread {
+                if (request != sourceRequest || service !== s || s.machine != machine) return@runOnUiThread
+                sourceBusy = false
+                sourceLabel = current?.let { it.mirror?.label ?: R.string.mirror_custom }
+                render()
+                if (!isResumed || !packageSource.isEnabled || Privacy.locked(context)) return@runOnUiThread
+                if (notice != null) Toast.makeText(context, notice, Toast.LENGTH_LONG).show()
+                if (openPicker && current != null) chooseMirror(installed, machine, current)
+            }
+        }
+    }
+
+    private fun chooseMirror(distro: Rootfs.Distro, machine: Long, current: Rootfs.PackageSources) {
+        fun applySelection(selected: Rootfs.Mirror) {
+            if (service?.machine != machine || !packageSource.isEnabled || Privacy.locked(requireContext())) return
+            updateSources { Rootfs.applyMirror(machine, distro, selected, current) }
+        }
+
+        val mirrors = Rootfs.Mirror.entries
+        val labels = mirrors.map { getString(it.label) }.toTypedArray()
+        MaterialAlertDialogBuilder(requireContext())
+            .setTitle(R.string.settings_package_source)
+            .setSingleChoiceItems(labels, current.mirror?.ordinal ?: -1) { dialog, i ->
+                dialog.dismiss()
+                val selected = mirrors[i]
+                if (selected == current.mirror) return@setSingleChoiceItems
+                if (current.mirror == null) {
+                    confirmMirror(distro, selected) { applySelection(selected) }
+                } else {
+                    applySelection(selected)
+                }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .showPrivate()
+    }
+
+    private fun confirmMirror(distro: Rootfs.Distro, mirror: Rootfs.Mirror, apply: () -> Unit) {
+        MaterialAlertDialogBuilder(requireContext())
+            .setTitle(R.string.mirror_replace)
+            .setMessage(getString(R.string.mirror_replace_message, distro.sourcesPath, getString(mirror.label)))
+            .setNegativeButton(android.R.string.cancel, null)
+            .setPositiveButton(android.R.string.ok) { _, _ -> apply() }
             .showPrivate()
     }
 
@@ -697,6 +780,7 @@ class SettingsFragment : PreferenceFragmentCompat(), TerminalService.Listener {
     }
 
     companion object {
+        private val sourceWorker = Executors.newSingleThreadExecutor { Thread(it, "appine-package-source") }
         private const val TELEGRAM_URL = "https://t.me/appinesh"
         private const val PROJECT_URL = "https://github.com/mthli/appine"
         private const val PRIVACY_POLICY_URL = "https://appine.sh/privacy"

@@ -4,6 +4,8 @@
 > See `.agents/decisions/android/settings.md` for the paired decision history (not yet created; decisions from before the split are D10–D12, D21–D23, D25, D26, D28, D31–D33, D35, D36, D38, D41, and the Settings halves of D1, D3, D9, D14 and D15 in `.agents/decisions/android/setup.md`).
 >
 > Verified: 2026-11-21 (split out of the android/setup full mapping of 2026-11-15; the boundary was checked against the source at the split)
+>
+> Maintained: 2026-11-28 (targeted verification only since the full mapping; latest change: package source summary, preset picker and custom configuration confirmation)
 
 ## Responsibilities
 
@@ -13,6 +15,7 @@
   switch and reset, login account, screen-off running policy, external file access, CJK wide-cell
   fill, cursor shape and blinking, tab-list button visibility, volume-key tab switching, execution
   mode and Vulkan GPU);
+- choosing a package source preset for the running guest and confirming replacement of custom sources;
 - exposing service-independent Android and debugging controls (conditional notification
   authorization and battery-usage rows, authenticated privacy mode, authorized diagnostic log
   export via Save to file or Share);
@@ -36,7 +39,7 @@ app-wide authentication and window protection (`android/privacy`).
 - `SettingsFragment` — a `PreferenceFragmentCompat` and `TerminalService.Listener`.
   `PreferenceCategory` groups standard `Preference` actions, `SwitchPreferenceCompat` toggles
   (a `MaterialSwitch` widget) and `ListPreference` choices (login account, screen-off running and
-  cursor shape). Groups: System (distro, login account, reset), Android (conditional notification
+  cursor shape). Groups: System (distro, package source, login account, reset), Android (conditional notification
   and battery usage actions, running policy, privacy mode, file access), Terminal (CJK characters
   filling two cells, the cursor's shape, whether it blinks, tab-list button visibility, the volume
   keys switching tabs), Debugging (execution mode, Vulkan GPU toggle and diagnostic export, in all
@@ -98,6 +101,11 @@ app-wide authentication and window protection (`android/privacy`).
   application context and a generation to discard results after stopping or a newer load.
   `onSettingsChanged` renders; `onProgress`, `onRestarting` and `onExitAll` finish the screen, so
   a switch, reset or restart goes back to the terminal, which shows the progress.
+- The package source action reads the live guest file when bound, when the machine becomes ready
+  and again on tap. It is enabled on a running machine outside a distro switch. The picker checks the
+  recognized preset and asks before replacing a custom configuration, naming the destination file.
+  A serial worker applies the selection to the captured machine and rereads the file. Stale selections
+  prompt a retry. Callbacks check the current request, service and machine before updating the page.
 - Service-owned rows read the service's state and call it:
   - distro: usable during a switch (it then cancels the download, after a confirmation) or when a
     switch is possible, a start failure included; choosing another distro or Reset asks first;
@@ -122,7 +130,7 @@ app-wide authentication and window protection (`android/privacy`).
   notification authorization, battery usage, diagnostic export, Telegram, project website, privacy
   policy, licenses and version remain usable. All preferences have stable resource-name keys and
   persistence disabled: they render service values and their change listeners call service setters,
-  never writing a second preference store (privacy, notification authorization and battery usage
+  never writing a second preference store (package sources use the guest file; privacy, notification authorization and battery usage
   use shared controllers). AndroidX manages row binding, disabled states and accessibility;
   `SwitchPreferenceCompat` binds the Material widget through `switchWidget`.
 - Login, running policy and cursor choices use `ChoiceDialog`: AndroidX keeps the entries,
@@ -168,7 +176,7 @@ app-wide authentication and window protection (`android/privacy`).
 
 - `TerminalService` and its `Listener` (`android/service`) for binding, state rendering, setters
   and notices.
-- `Rootfs` (`android/setup`: `Distro`, `installed`, `regularAccounts`, `loginAccount`).
+- `Rootfs` (`android/setup`: `Distro`, `installed`, `regularAccounts`, `loginAccount`, `packageSources`, `applyMirror`).
 - `Diagnostics` (`android/reports`: archive export, save/share paths and `DiagnosticProvider`
   grants).
 - `android/privacy` (`Privacy` mode changes, `requestLogExport`, `deferNextUnlock`, `protect`).
@@ -185,7 +193,7 @@ app-wide authentication and window protection (`android/privacy`).
   Material's layout and nested-scroll callbacks inspect different views, so preference updates
   can reset the app bar's lifted background even while the list remains scrolled.
 - Every preference must keep persistence disabled and route writes through `TerminalService` (or
-  the shared `Privacy` / notification / battery controllers) so Settings never writes a second
+  `Rootfs` for package sources and the shared `Privacy` / notification / battery controllers) so Settings never writes a second
   preference store or bypasses service side effects.
 - Material dialogs must use `showPrivate` and restored choice dialogs `Privacy.protect` so
   separate dialog windows follow `FLAG_SECURE` under privacy mode.

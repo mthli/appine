@@ -1506,6 +1506,38 @@ class MachineTest {
     }
 
     @Test(timeout = 60000)
+    fun manualMirrorSelectionChecksTheLiveConfiguration() = withAlpineStore("manual-mirror") { store ->
+        val distro = Rootfs.Distro.ALPINE
+        val path = distro.sourcesPath
+        withMachine(store) { machine ->
+            fun current() = Rootfs.packageSources(machine, distro)
+            fun select(mirror: Rootfs.Mirror, from: Rootfs.PackageSources) =
+                Rootfs.applyMirror(machine, distro, mirror, from)
+
+            val imported = current()
+            assertEquals(Rootfs.Mirror.OFFICIAL, imported.mirror)
+            assertTrue(select(Rootfs.Mirror.USTC, imported))
+            val ustc = current()
+            assertEquals(Rootfs.Mirror.USTC, ustc.mirror)
+            checkedShell(machine, "echo '# extra repository' >> $path")
+            assertNull(current().mirror)
+            assertFalse(select(Rootfs.Mirror.TUNA, ustc))
+            assertTrue(checkedShell(machine, "cat $path").endsWith("# extra repository\n"))
+            assertTrue(select(Rootfs.Mirror.TUNA, current()))
+            checkedShell(machine, "mv $path $path.original && ln -s $path.original $path")
+            val link = current()
+            assertNull(link.mirror)
+            assertTrue(select(Rootfs.Mirror.ALIYUN, link))
+            checkedShell(machine, "test ! -L $path && grep -q tsinghua $path.original && grep -q aliyun $path")
+            checkedShell(machine, "rm $path")
+            val missing = current()
+            assertNull(missing.mirror)
+            assertTrue(select(Rootfs.Mirror.OFFICIAL, missing))
+            assertEquals(imported, current())
+        }
+    }
+
+    @Test(timeout = 60000)
     fun mirrorSelectionFallsBackToOfficialSources() = withTempStore("mirror-fallback") { store ->
         val distro = Rootfs.Distro.ALPINE
         val (official, tuna, ustc) = distro.mirrors
@@ -1530,6 +1562,12 @@ class MachineTest {
             withMachine(store.path) { machine ->
                 val uris = checkedShell(machine, "grep '^URIs:' /etc/apt/sources.list.d/debian.sources")
                 assertEquals("URIs: http://$mirror/debian\nURIs: http://$mirror/debian-security\n", uris)
+                val current = Rootfs.packageSources(machine, distro)
+                assertEquals(Rootfs.Mirror.TUNA, current.mirror)
+                assertTrue(Rootfs.applyMirror(machine, distro, Rootfs.Mirror.ALIYUN, current))
+                val host = Rootfs.Mirror.ALIYUN.debianHost
+                assertEquals("URIs: http://$host/debian\nURIs: http://$host/debian-security\n",
+                    checkedShell(machine, "grep '^URIs:' " + distro.sourcesPath))
             }
         }
     }

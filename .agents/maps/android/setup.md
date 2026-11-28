@@ -5,7 +5,7 @@
 >
 > Verified: 2026-11-26 (full mapping, 15 claims independently checked across package verification, store publication, per-start setup, OpenRC, account selection and shell integration)
 >
-> Maintained: 2026-11-27 (targeted verification only since the full mapping; latest change: in-place condensation with no mapped claim changes)
+> Maintained: 2026-11-28 (targeted verification only since the full mapping; latest change: guest inspection and atomic replacement of package source presets from Settings)
 
 ## Responsibilities
 
@@ -18,7 +18,7 @@
   bundled doas package, the profile script and the files of ash's, bash's and zsh's prompt marks for the
   terminal's shell integration), one-time OpenRC setup on Alpine, the osclock script run before boot and the boot log's failed services;
 - package mirrors: built-in lists, concurrent throughput probes during import and one sources write in the
-  temporary store;
+  temporary store, plus user-selected presets on a running system;
 - resolving the login account and the per-tab login script (`login.sh`), including the first-login
   admin setup, installing the bundled bash, procps-ng and bubblewrap, and the NOPASSWD rules;
 - the store lock shared by the kernel start, store deletion and the Files provider.
@@ -46,6 +46,7 @@ logins happen, and the `settings` preferences (`android/service`); the import an
   - `DEBIAN`: "Debian 13"; one pinned GitHub URL (debuerreotype's `debian:trixie`) with fixed
     length and sha256; mirrors are host names (deb.debian.org, Tsinghua, USTC, Aliyun), probed at
     `debian/dists/trixie/InRelease` over https.
+  - `Mirror` provides the localized preset label and host for each distro.
   - The first mirror of each list is the official one: the importer uses it when no successful probe is ready.
 - Preferences: file `rootfs`, owned here (`distro`); the `settings` file is `android/service`'s
   `Settings`, displayed and edited through `android/settings`.
@@ -78,7 +79,7 @@ logins happen, and the `settings` preferences (`android/service`); the import an
   `ensureBrowser`, `updateProfile`, and Alpine's `openrc-setup-done` precheck in order; fatal on
   fresh imports, independently degrading on existing stores; returns `StartPreparation`); around
   boot: `ensureOpenRc`, `boot`, `PREFER_OSCLOCK`, `failedServices`.
-- Mirrors: the service supplies `probeMirrors` to `prepare`. The default imports offline with official sources when the tarball is local.
+- Mirrors: the service supplies `probeMirrors` to `prepare`. The default imports offline with official sources when the tarball is local. Settings uses `packageSources` and `applyMirror` on the running machine.
 - Accounts: `loginAccount`, `regularAccounts`, `LoginRules.poll` (with `REFRESH_RULES`).
 - `scripts/fetch-rootfs [outdir]` (build-time download of the Alpine minirootfs and the bundled
   packages into `target/rootfs` by default; prints each package's path, then the tarball's last).
@@ -280,6 +281,12 @@ logins happen, and the `settings` preferences (`android/service`); the import an
 - The importer requests cancellation of outstanding probes before syncing and renaming the
   temporary store. Probe tasks only measure throughput. A ready store skips the entire import,
   so users can edit or remove sources in the guest.
+- On demand, Settings inspects the source file through a guest shell. An exact SHA-256 match identifies
+  a preset. Missing files and symlinks have distinct fingerprints and count as custom.
+- Manual selection stages the import template beside the destination with mode 0644, rechecks the
+  displayed fingerprint and renames it over the destination. Replacing a symlink preserves its target.
+  Rename publishes a complete file. A concurrent guest editor can still write between the fingerprint
+  check and rename.
 
 ### Accounts and login
 
@@ -352,7 +359,7 @@ logins happen, and the `settings` preferences (`android/service`); the import an
 
 - `TerminalService` (`android/service`: start, import, switch, reset, the mirror probe, per-start
   files, boot, the poll's `LoginRules`, login accounts), `SettingsFragment` (`android/settings`:
-  `Distro`, `installed`, `regularAccounts`, `loginAccount`), `Documents` (`android/documents`:
+  `Distro`, `installed`, `regularAccounts`, `loginAccount`, package source inspection and selection), `Documents` (`android/documents`:
   `loginAccount`, `installed`, `isReady`, `access`), `ConsolePty` (`android/vt`: runs `login.sh`),
   the instrumentation tests (`fetch`, `prepare` into another store with supplied probe results, `updateProfile`,
   `PREFER_OSCLOCK`).

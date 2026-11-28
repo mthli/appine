@@ -135,6 +135,18 @@
     <string name="download_failed">%1$sをダウンロードできません：%2$s</string>
     <string name="switch_failed">%1$sを準備できません：%2$s\n\n代わりに%3$sを使用します。</string>
 
+    <string name="settings_package_source">パッケージの取得元</string>
+    <string name="mirror_official">公式ミラー</string>
+    <string name="mirror_tuna">清華大学 TUNA</string>
+    <string name="mirror_ustc">中国科学技術大学</string>
+    <string name="mirror_aliyun">Alibaba Cloud</string>
+    <string name="mirror_custom">カスタム設定</string>
+    <string name="mirror_read_failed">取得元を読み取れません。タップして再試行してください。</string>
+    <string name="mirror_replace">カスタム設定を置き換えますか？</string>
+    <string name="mirror_replace_message">%1$s を「%2$s」の設定で置き換えますか？</string>
+    <string name="mirror_changed">設定が変更されました。取得元を選び直してください。</string>
+    <string name="mirror_write_failed">取得元の設定を書き込めませんでした。</string>
+
     <string name="settings_reset">rootfsをリセット</string>
     <string name="reset_summary">すべてのファイルを削除してrootfsを再初期化</string>
     <string name="reset_title">rootfsをリセットしますか？</string>
