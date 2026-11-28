@@ -259,8 +259,11 @@
 
     <string name="channel_network">ネットワークサービス</string>
     <string name="listening_title">%1$sがポート%2$dで待ち受け中</string>
-    <string name="listening_mapped">他の端末はポート%1$dに接続してください。このスマートフォンのアプリはポート%2$dを使用できないため、Appineが接続先を変更しました。</string>
-    <string name="listening_direct">同じネットワーク上の他の端末から接続できます</string>
+    <string name="listening_endpoint">%1$s に接続してください</string>
+    <string name="listening_port">この端末のローカル IP アドレスとポート %1$d を使って接続してください</string>
+    <string name="listening_mapped">%1$s（ポート %2$d はこの端末のポート %3$d に割り当てられています）</string>
+    <string name="copy_address">アドレスをコピー</string>
+    <string name="address_copied">アドレスをコピーしました</string>
 
     <string name="channel_problems">プロセスとサービス</string>
 

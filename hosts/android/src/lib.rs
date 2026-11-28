@@ -1294,9 +1294,8 @@ pub extern "system" fn Java_io_github_mthli_appine_Native_consoleCwd<'l>(
     })
 }
 
-/// Takes the ports the guest listened on for the first time on a non-loopback address (design doc
-/// §12 item 7): each entry is `<process name>\t<port>\t<host port>`; an empty array when there are
-/// none.
+/// Drains first listens as tab-separated guest port, host port, bind IP (or `*` for a dual-stack
+/// wildcard), bound interface index and process name. The final field may contain tabs.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_io_github_mthli_appine_Native_takeListens<'l>(
     mut env: JNIEnv<'l>,
@@ -1308,7 +1307,17 @@ pub extern "system" fn Java_io_github_mthli_appine_Native_takeListens<'l>(
             .map(|m| m.take_listens())
             .unwrap_or_default()
             .iter()
-            .map(|e| format!("{}\t{}\t{}", e.comm, e.port, e.host_port))
+            .map(|e| {
+                let bind = if e.dual_stack {
+                    "*".into()
+                } else {
+                    e.address.to_string()
+                };
+                format!(
+                    "{}\t{}\t{}\t{}\t{}",
+                    e.port, e.host_port, bind, e.interface, e.comm
+                )
+            })
             .collect();
         string_array(&mut env, &lines)
     })

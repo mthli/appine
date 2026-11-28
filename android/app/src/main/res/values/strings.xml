@@ -266,8 +266,11 @@
 
     <string name="channel_network">Network services</string>
     <string name="listening_title">%1$s is listening on port %2$d</string>
-    <string name="listening_mapped">Other devices connect to port %1$d: apps cannot use port %2$d on this phone, so Appine moved it there.</string>
-    <string name="listening_direct">Other devices on the network can connect to it</string>
+    <string name="listening_endpoint">Connect to %1$s</string>
+    <string name="listening_port">Connect using this phone’s local IP and port %1$d</string>
+    <string name="listening_mapped">%1$s (port %2$d is mapped to %3$d on this phone)</string>
+    <string name="copy_address">Copy address</string>
+    <string name="address_copied">Address copied</string>
 
     <string name="channel_problems">Processes and services</string>
 

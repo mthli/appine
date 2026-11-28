@@ -5,7 +5,7 @@
 >
 > Verified: 2026-11-21 (split out of the android/service full mapping of 2026-11-15; the boundary was checked against the source at the split)
 >
-> Maintained: 2026-11-28 (targeted verification only since the full mapping; latest change: high importance for new network channels)
+> Maintained: 2026-11-28 (targeted verification only since the full mapping; latest change: listen endpoints and their clipboard action)
 
 ## Responsibilities
 
@@ -15,7 +15,7 @@
   renaming, and building, posting and cancelling non-ongoing notifications (kill reports, Appine
   bugs, crashes/ANRs of the previous run, BKL stalls, boot service failures, listening ports and
   per-tab bells, program notifications, statuses and finished commands);
-- building copyable English bug/crash/stall reports and handling the "Copy report" action via the
+- building copyable English bug/crash/stall reports and handling the report and listen address copy actions via the
   non-exported `Notifications.ReportReceiver` (with `Privacy.locked` checks and handoff to
   `android/privacy`'s `NotificationActivity` under privacy mode);
 - process-local diagnostic retention (`Diagnostics`, `DiagnosticFiles`) independent of
@@ -43,7 +43,7 @@ UI and SAF save picker (`android/settings`); installing `Diagnostics` at process
   and `channelLocales` (the languages the channels were last named in). `TerminalService` decides
   what is told (the tab in front, a message shown in the tab); `Notifications` builds, posts and
   cancels.
-- `Notifications.ReportReceiver` — non-exported broadcast receiver copying ordinary fault reports
+- `Notifications.ReportReceiver` — non-exported broadcast receiver copying fault reports and listen addresses
   directly to the clipboard without starting `TerminalService` or the kernel.
 - `Diagnostics` — process-local log/report retention and serialized archive export, installed from
   `MainApplication` without starting the service or loading `Native`; builds environment metadata
@@ -63,7 +63,7 @@ UI and SAF save picker (`android/settings`); installing `Diagnostics` at process
 - `Notifications` (called by `TerminalService`): channel creation and locale refresh, `stall`,
   `crash`, `bootFailures`, `listen`, `kill`, `bell`, `program`, `status`, `clearStatus`,
   `commandFinished`, `cancelTab`, `clearNonOngoing` (privacy mode); static
-  `Notifications.copyReport` (called by `ReportReceiver`, `NotificationActivity` and legacy
+  `Notifications.copyNotificationText` (called by `ReportReceiver`, `NotificationActivity` and legacy
   `TerminalService` intents).
 - `Diagnostics`: `install` (from `MainApplication`), `report`/`recordFault` hooks (from
   `Notifications` and `TerminalService`), `environment`, `export(forSave)` (from
@@ -109,7 +109,7 @@ UI and SAF save picker (`android/settings`); installing `Diagnostics` at process
 
 - With privacy enabled, notification event and session details are hidden: non-ongoing titles and
   bodies use generic text, and enabling removes old non-ongoing notifications (tab numbers and
-  action labels remain). Report-copy actions target non-exported `Notifications.ReportReceiver`
+  action labels remain). Report and address copy actions target non-exported `Notifications.ReportReceiver`
   normally and non-exported `NotificationActivity` (`android/privacy`) during privacy mode; only
   the latter opens the authentication page. Both copy directly without starting the kernel, and
   all copy paths (including legacy service intents) check `Privacy.locked` at delivery. Reports
@@ -142,7 +142,12 @@ UI and SAF save picker (`android/settings`); installing `Diagnostics` at process
   kernel (the kernel queues at most 32; one dropped from a full queue is reported only when the
   guest listens on that pair again), with remap text when the ports differ; notifications are keyed
   by `(tag = "listen:<guest>:<host>", id = 1000 + guest port)` (`Notifications.listenKey`) so
-  different host-port remappings of the same guest port do not overwrite each other.
+  different host-port remappings of the same guest port do not overwrite each other. A concrete bind
+  supplies its IP. Wildcards select a compatible Wi-Fi or Ethernet address at notification time,
+  respecting the bound interface and preferring IPv4 on dual-stack LANs. IPv6 link-local addresses
+  need a zone on the peer and are omitted. With an address, the body and "Copy address" share the
+  same formatted host endpoint. The copy intent uses the notification tag as its identifier.
+  Without an address the body gives the host port alone. Network changes do not refresh posted addresses.
 - Tab notifications (`Notifications.tab`, on the `terminal` channel): one per tab (id
   `200000 + tab id mod 100000`), replaced by the tab's next one: titled with OSC 777's title or a
   status record's title, else the program's title (`sh` when none), with the body, "The terminal
@@ -176,7 +181,7 @@ UI and SAF save picker (`android/settings`); installing `Diagnostics` at process
 - `MainApplication` (`android/native`: calls `Diagnostics.install`).
 - `SettingsFragment` (`android/settings`: calls `Diagnostics.export` and grants Share URIs via
   `DiagnosticProvider`).
-- `NotificationActivity` (`android/privacy`: calls `Notifications.copyReport` after unlock).
+- `NotificationActivity` (`android/privacy`: calls `Notifications.copyNotificationText` after unlock).
 - Instrumentation tests (`android/tests`: `DiagnosticsTest`, notification routing and privacy
   checks).
 
@@ -195,7 +200,7 @@ UI and SAF save picker (`android/settings`); installing `Diagnostics` at process
   both.
 - Every path that posts a tab's notification (bell, OSC 9/777, finished command) must clear
   `statusNotified` for that tab so later status withdrawal does not cancel a newer notification.
-- All report-copy entry points (`ReportReceiver`, `NotificationActivity` and legacy service
+- All notification clipboard entry points (`ReportReceiver`, `NotificationActivity` and legacy service
   intents) must check `Privacy.locked` at delivery without starting the kernel.
 - `Diagnostics` must never call native kernel APIs or run on `TerminalService`'s worker, so
   exports succeed even when the kernel is stuck or stopped.

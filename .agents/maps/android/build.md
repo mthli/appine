@@ -5,7 +5,7 @@
 >
 > Verified: 2026-11-15 (split out of the android/native full mapping of 2026-11-10; the boundary was checked against the source at the split)
 >
-> Maintained: 2026-11-28 (targeted verification only since the full mapping; latest change: Android and Cargo release versions)
+> Maintained: 2026-11-28 (targeted verification only since the full mapping; latest change: listen addresses use the manifest’s existing clipboard action targets)
 
 ## Responsibilities
 
@@ -143,7 +143,7 @@ fetch/provisioning `android/setup`. CI orchestration remains `harness`.
   the app's resources rather than dependency translations. Android 11–12
   ignore the attribute and keep following the system language; the application suppresses
   lint's `UnusedAttribute` for this intentional version-specific behavior.
-- Manifest application `MainApplication` lives in its own file and installs android/privacy's shared page gate with `Privacy.install` in `onCreate`; non-exported `NotificationActivity` (android/privacy) authenticates private report-copy actions, while non-exported `Notifications.ReportReceiver` (android/reports) copies ordinary reports without opening a page. AndroidX Biometric is listed in the static Android library notice; both runtime dependency inventories were checked.
+- Manifest application `MainApplication` lives in its own file and installs android/privacy's shared page gate with `Privacy.install` in `onCreate`; non-exported `NotificationActivity` (android/privacy) authenticates private report and address copy actions, while non-exported `Notifications.ReportReceiver` (android/reports) copies reports and addresses without opening a page. AndroidX Biometric is listed in the static Android library notice; both runtime dependency inventories were checked.
 - `MainApplication` also installs `Diagnostics` (android/reports) after the privacy gate. Non-exported
   `DiagnosticProvider` (android/reports) uses the existing AndroidX FileProvider with manifest path metadata,
   granting only generated archives from `cache/diagnostic-exports`; no new permission or

@@ -5,7 +5,7 @@
 >
 > Verified: 2026-11-26 (full refresh: 5 research concerns; 18 claims checked by an independent verifier — 18 confirmed, 0 partial, 0 refuted, plus 6 map-audit refinements and 4 additional confirmed bugs folded in)
 >
-> Maintained: 2026-11-27 (targeted verification only since the full mapping; latest change: in-place condensation with no mapped claim changes)
+> Maintained: 2026-11-28 (targeted verification only since the full mapping; latest change: bind address and interface in listen events)
 
 ## Responsibilities
 
@@ -335,8 +335,8 @@ the live lookup immediately and permits reverse translation for less than 10 s.
 `map_dest` rewrites a live mapped port only on loopback, wildcard or a host interface address.
 `unmap_addr` applies the socket's matching local pair. `translate_peer` passes the intact endpoint to
 `netns::from_host_peer`. A matching saved peer pair precedes a namespace binding or local initial reverse
-lookup. Accept, peer names, recv and proc share it. Non-loopback host listens enqueue comm and guest/host
-ports, even when equal. Only queued port pairs are deduplicated for the instance lifetime. A pair dropped
+lookup. Accept, peer names, recv and proc share it. Non-loopback host listens enqueue comm, guest and host ports, host bind IP, dual-stack wildcard status
+and the bound interface index. Only queued port pairs are deduplicated for the instance lifetime. A pair dropped
 at the 32-event cap remains eligible. `Machine::take_listens` drains the queue.
 
 `forward_target` considers initial TCP/MPTCP listeners and bound UDP with PREROUTING NAT. It restores the

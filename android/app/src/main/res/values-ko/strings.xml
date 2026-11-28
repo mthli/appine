@@ -259,8 +259,11 @@
 
     <string name="channel_network">네트워크 서비스</string>
     <string name="listening_title">%1$s: 포트 %2$d에서 연결 대기 중</string>
-    <string name="listening_mapped">다른 기기는 포트 %1$d에 연결하세요. 이 휴대전화의 앱은 포트 %2$d를 사용할 수 없어 Appine이 연결 포트를 변경했습니다.</string>
-    <string name="listening_direct">같은 네트워크의 다른 기기에서 연결할 수 있습니다</string>
+    <string name="listening_endpoint">%1$s에 연결하세요</string>
+    <string name="listening_port">이 휴대전화의 로컬 IP 주소와 포트 %1$d로 연결하세요</string>
+    <string name="listening_mapped">%1$s (포트 %2$d가 이 휴대전화의 포트 %3$d에 매핑되었습니다)</string>
+    <string name="copy_address">주소 복사</string>
+    <string name="address_copied">주소를 복사했습니다</string>
 
     <string name="channel_problems">프로세스 및 서비스</string>
 

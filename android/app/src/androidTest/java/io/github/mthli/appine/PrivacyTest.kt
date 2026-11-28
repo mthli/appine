@@ -144,7 +144,7 @@ class PrivacyTest {
     }
 
     @Test
-    fun onlyPrivateReportActionsOpenAnActivity() {
+    fun privateClipboardActionsOpenAnActivity() {
         val prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
         val privacy = Settings.privacyMode(context)
         try {
@@ -158,12 +158,18 @@ class PrivacyTest {
                         pending.cancel()
                     }
                 }
-                val copy = Notifications.copyReportAction(context, 903, "Private report").actionIntent
+                val report = Notifications.copyReportAction(context, 903, "Private report").actionIntent
+                val first = Notifications.copyAddressAction(context, 1022, "listen:22:10022", "192.0.2.1:10022").actionIntent
+                val second = Notifications.copyAddressAction(context, 1022, "listen:22:20022", "192.0.2.1:20022").actionIntent
+                val copies = listOf(report, first, second)
                 try {
-                    assertEquals(enabled, copy.isActivity)
-                    assertEquals(!enabled, copy.isBroadcast)
+                    assertTrue(first != second)
+                    for (copy in copies) {
+                        assertEquals(enabled, copy.isActivity)
+                        assertEquals(!enabled, copy.isBroadcast)
+                    }
                 } finally {
-                    copy.cancel()
+                    copies.forEach { it.cancel() }
                 }
             }
         } finally {
@@ -172,12 +178,12 @@ class PrivacyTest {
     }
 
     @Test
-    fun staleReportActionsCannotAccessTheClipboardWhileLocked() {
+    fun staleCopyActionsCannotAccessTheClipboardWhileLocked() {
         val prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
         val privacy = Settings.privacyMode(context)
         val guarded = object : ContextWrapper(context) {
             override fun getSystemService(name: String): Any? {
-                check(name != Context.CLIPBOARD_SERVICE) { "Locked reports must not access the clipboard" }
+                check(name != Context.CLIPBOARD_SERVICE) { "Locked notification actions must not access the clipboard" }
                 return super.getSystemService(name)
             }
         }
@@ -187,8 +193,10 @@ class PrivacyTest {
                 assertTrue(Privacy.locked(guarded))
                 val report = Intent(Notifications.ACTION_COPY_REPORT).putExtra("report", "Private report")
                 Notifications.ReportReceiver().onReceive(guarded, report)
+                val address = Intent("io.github.mthli.appine.COPY_ADDRESS").putExtra("address", "192.0.2.1:10022")
+                Notifications.ReportReceiver().onReceive(guarded, address)
                 // Older releases used a service PendingIntent; its handler shares this check.
-                Notifications.copyReport(guarded, report)
+                Notifications.copyNotificationText(guarded, report)
             }
         } finally {
             prefs.edit(commit = true) { putBoolean("privacy_mode", privacy) }

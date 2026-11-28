@@ -5,7 +5,7 @@
 >
 > Verified: 2026-11-26 (full refresh: 15 adversarial claims checked by independent verifier — 14 confirmed, 1 partial corrected below, 0 refuted; precision fixes and confirmed bugs/debts recorded)
 >
-> Maintained: 2026-11-27 (targeted verification only since the full mapping; latest change: stack-scoped thread-local store sessions via `withStore`, `storeWriteFile` and `storeReadFile`)
+> Maintained: 2026-11-28 (targeted verification only since the full mapping; latest change: listen records carry socket binding details)
 
 ## Responsibilities
 
@@ -77,7 +77,7 @@ Paths encode percent signs, control characters and invalid UTF-8 bytes as `%XX`.
 
 | Signature | Result |
 | --- | --- |
-| `takeListens(machine: Long): Array<String>?` | Drain tab-separated process name, guest port and actual host port for first non-loopback listens. |
+| `takeListens(machine: Long): Array<String>?` | Drain guest port, host port, bind address (`*` for dual-stack wildcard), bound interface index and process name, in tab-separated order. |
 | `takeKills(machine: Long): Array<String>?` | Seven tab-separated fields. Console (−1 if absent), PID and process name precede either `bug, report, log, stubs` or `oom, cgroup, used bytes, limit bytes`. The app-limit cgroup is empty. Clean TAB, LF, CR and U+001E to spaces within fields, then join log lines and observed stub paths separately with U+001E. |
 | `bklStall(machine: Long): String?` | Latest watchdog stall as tab-separated ID, seconds, report and end record (empty while ongoing). TAB, LF and CR in the two text fields become spaces. Uses the stall mutex. Null if unavailable. |
 | `takePower(machine: Long): Int` | Consume the request. 0 none, 1 reboot, 2 halt, 3 power off. |
@@ -190,7 +190,6 @@ Kernel `host_call` reports contained panics and returns `None`. Depending on the
 
 ## Confirmed bugs / technical debt
 
-- A tab in the raw `takeListens` process name adds a field. `Notifications.listen` drops the row.
 - `browseSearch` clamps nonpositive limits to zero, but the store tests the limit after appending a match. Zero can yield one row. Documents requests 200.
 - Forward probing omits the winning UUID from its reply. Mapper selection stops at the first device it can create, before checking its coherent types. Multiple GPUs can therefore hide a viable mapper or cause a later import UUID mismatch.
 - Socket timeouts do not bound fence retirement or driver idle. An unsignaled fence can retain mappings and delay disconnect/unbind. Probe cleanup can outlive its client.

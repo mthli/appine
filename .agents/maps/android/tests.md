@@ -5,7 +5,7 @@
 >
 > Verified: 2026-11-15 (split out of the android/native full mapping of 2026-11-10; the boundary was checked against the source at the split)
 >
-> Maintained: 2026-11-24 (targeted verification only since the full mapping; latest change: raw ash prompt paths and titles in the login test)
+> Maintained: 2026-11-28 (targeted verification only since the full mapping; latest change: listen address selection and clipboard action routing)
 
 ## Responsibilities
 
@@ -82,7 +82,7 @@ debug variant, manifest and network-security configuration belong to `android/bu
   the terminal-themed dialog; the tests do not drive Gboard's UI. A MainActivity case opens
   two temporary service sessions and checks that OSC 52 can ask again after a notification
   switches tabs and after the activity stops and resumes.
-- `PrivacyTest` covers default-off/mutually exclusive file access, cold and recreated locked pages, pause-only visibility versus stop-and-return locking, secure dialog flags, non-exported action targets, service/broadcast/activity routing and locked-report clipboard denial without an authentication bypass. `MachineTest.documentsShowTheHomeDirectory` also checks every provider denial with privacy on and a stale true file-access preference.
+- `PrivacyTest` covers default-off/mutually exclusive file access, cold and recreated locked pages, pause-only visibility versus stop-and-return locking, secure dialog flags, non-exported action targets, service/broadcast/activity routing and locked report and address clipboard denial without an authentication bypass. `MachineTest.documentsShowTheHomeDirectory` also checks every provider denial with privacy on and a stale true file-access preference.
 - `BrowserTest` imports separate temporary stores and checks custom launcher preservation,
   launching without a TTY or stdio, root and `su` users, endpoint replacement with a surviving
   shell, authentication and URL validation, refusal/timeout, queued UI cancellation, and Custom Tab intents.
@@ -91,7 +91,7 @@ debug variant, manifest and network-security configuration belong to `android/bu
 - `RunPolicyTest` uses a separate preference file for legacy migration and remembered toggle
   targets, checks idle expiry, activity, failed samples and delayed delivery with a fake clock,
   and checks `ConsoleTracker`/`TerminalService.sessionForKill` routing across reused console
-  numbers.
+  numbers. It checks listen address formatting, wildcard family selection, missing addresses and distinct notification keys for remapped ports.
   `MachineTest.guestCpuTimeTracksRunningAndExitedThreads` checks both tiers, exited and pooled
   threads, idle stability and stopped handles.
 - `MachineTest` runs in the debug app's own process against the app's real store and

@@ -2061,6 +2061,9 @@ fn low_ports_bind_the_real_port_or_elsewhere() {
             comm: "nc".into(),
             port,
             host_port,
+            address: std::net::Ipv6Addr::UNSPECIFIED.into(),
+            dual_stack: true,
+            interface: 0,
         };
         assert_eq!(event, want, "{tier:?}");
         // nc does not close the connection after reading stdin; this side closes it once it has

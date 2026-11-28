@@ -14,12 +14,20 @@ import android.icu.text.ListFormatter
 import android.icu.text.MeasureFormat
 import android.icu.util.Measure
 import android.icu.util.MeasureUnit
+import android.net.ConnectivityManager
+import android.net.InetAddresses
+import android.net.NetworkCapabilities
 import android.os.Build
 import android.os.LocaleList
 import android.widget.Toast
 import io.github.mthli.appine.Notifications.Companion.BELL_NOTIFY_MS
 import io.github.mthli.appine.Notifications.Companion.COMMAND_NOTIFY_MS
 import io.github.mthli.appine.Notifications.Companion.KILL_NOTIFICATION_BASE
+import java.net.Inet4Address
+import java.net.Inet6Address
+import java.net.InetAddress
+import java.net.NetworkInterface
+import java.net.SocketException
 import java.text.DateFormat
 import java.time.Instant
 import java.util.Date
@@ -154,25 +162,52 @@ internal class Notifications(private val service: TerminalService) {
         manager.notify(BOOT_NOTIFICATION_ID, builder(PROBLEMS_CHANNEL_ID, title, text).build())
     }
 
-    /**
-     * An entry of [Native.takeListens]: `<process name>\t<port>\t<host port>`. Keyed by both guest
-     * and host port so remappings of the same guest port to different host ports do not overwrite
-     * each other's notification.
-     */
+    /** Posts the endpoint the user can copy for this first listen on a guest/host port pair. */
     fun listen(line: String) {
-        val fields = line.split('\t')
-        if (fields.size != 3) return
-        val comm = fields[0]
-        val port = fields[1].toIntOrNull()?.takeIf { it in 0..65535 } ?: return
-        val hostPort = fields[2].toIntOrNull()?.takeIf { it in 0..65535 } ?: return
-        val text = if (hostPort != port) {
-            service.getString(R.string.listening_mapped, hostPort, port)
+        val fields = line.split('\t', limit = 5)
+        if (fields.size != 5) return
+        val (guest, host, bind, index, comm) = fields
+        val port = guest.toPortOrNull() ?: return
+        val hostPort = host.toPortOrNull() ?: return
+        val interfaceIndex = index.toIntOrNull() ?: return
+        val endpoint = listenEndpoint(bind, hostPort) { lanAddresses(interfaceIndex) }
+        val connection = if (endpoint == null) {
+            service.getString(R.string.listening_port, hostPort)
         } else {
-            service.getString(R.string.listening_direct)
+            service.getString(R.string.listening_endpoint, endpoint)
+        }
+        val text = if (hostPort == port) connection else {
+            service.getString(R.string.listening_mapped, connection, port, hostPort)
         }
         val title = service.getString(R.string.listening_title, comm, port)
         val (tag, id) = listenKey(port, hostPort)
-        manager.notify(tag, id, builder(NETWORK_CHANNEL_ID, title, text).build())
+        val notification = builder(NETWORK_CHANNEL_ID, title, text)
+        if (endpoint != null) notification.addAction(copyAddressAction(service, id, tag, endpoint))
+        manager.notify(tag, id, notification.build())
+    }
+
+    private fun String.toPortOrNull(): Int? = toIntOrNull()?.takeIf { it in 1..65535 }
+
+    /** Try the default network first, then other connected LANs (for example, under a VPN). */
+    @Suppress("DEPRECATION") // A one-time snapshot when a wildcard listener is announced.
+    private fun lanAddresses(interfaceIndex: Int): Sequence<InetAddress> = sequence {
+        val cm = service.getSystemService(ConnectivityManager::class.java)
+        for (network in (listOfNotNull(cm.activeNetwork) + cm.allNetworks).distinct()) {
+            val caps = cm.getNetworkCapabilities(network) ?: continue
+            if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)) continue
+            if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) &&
+                !caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) continue
+
+            val link = cm.getLinkProperties(network) ?: continue
+            if (interfaceIndex != 0 && interfaceIndex != indexOfInterface(link.interfaceName)) continue
+            yieldAll(link.linkAddresses.map { it.address }.sortedBy { it !is Inet4Address })
+        }
+    }
+
+    private fun indexOfInterface(name: String?): Int? = try {
+        name?.let { NetworkInterface.getByName(it)?.index }
+    } catch (_: SocketException) {
+        null
     }
 
     /**
@@ -211,7 +246,7 @@ internal class Notifications(private val service: TerminalService) {
     }.also(Diagnostics::record)
 
     /** Legacy service actions use the same privacy check as the receiver and activity. */
-    fun copyReport(intent: Intent) = copyReport(service, intent)
+    fun copyReport(intent: Intent) = copyNotificationText(service, intent)
 
     /**
      * A program in [session], not the tab in front, rang the bell: the tab's notification ([tab]),
@@ -353,10 +388,10 @@ internal class Notifications(private val service: TerminalService) {
         service, 0, Intent(service, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE,
     )
 
-    /** Copies reports without starting the terminal; stale actions are checked at delivery. */
+    /** Copies notification text without starting the terminal; stale actions are checked at delivery. */
     class ReportReceiver : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            if (intent.action == ACTION_COPY_REPORT) copyReport(context, intent)
+            copyNotificationText(context, intent)
         }
     }
 
@@ -386,6 +421,25 @@ internal class Notifications(private val service: TerminalService) {
         internal fun listenKey(port: Int, hostPort: Int): Pair<String, Int> =
             "listen:$port:$hostPort" to (LISTEN_NOTIFICATION_BASE + port)
 
+        /** Wildcards need a LAN address of the appropriate family. Link-local IPv6 needs a peer-side zone. */
+        internal fun listenEndpoint(bind: String, port: Int, lanAddresses: () -> Sequence<InetAddress>): String? {
+            fun usable(ip: InetAddress) = !ip.isAnyLocalAddress && !ip.isLoopbackAddress && !ip.isMulticastAddress &&
+                !(ip is Inet6Address && ip.isLinkLocalAddress)
+
+            fun Sequence<InetAddress>.firstUsableAddress() =
+                firstOrNull(::usable)?.hostAddress?.substringBefore('%')
+
+            val address = when (bind) {
+                "*" -> lanAddresses().firstUsableAddress()
+                "::" -> lanAddresses().filterIsInstance<Inet6Address>().firstUsableAddress()
+                "0.0.0.0" -> lanAddresses().filterIsInstance<Inet4Address>().firstUsableAddress()
+                else -> bind.takeIf {
+                    InetAddresses.isNumericAddress(it) && usable(InetAddresses.parseNumericAddress(it))
+                }
+            } ?: return null
+            return if (':' in address) "[$address]:$port" else "$address:$port"
+        }
+
         /**
          * Notifications of ended processes: one id per report, above every listen id, so neither a
          * listen nor a later report replaces one (and with it a bug's "Copy report").
@@ -410,38 +464,43 @@ internal class Notifications(private val service: TerminalService) {
          */
         private const val COMMAND_NOTIFY_MS = 10_000L
 
-        /** The notification action for "Copy report" ([copyReport]). */
         const val ACTION_COPY_REPORT = "io.github.mthli.appine.COPY_REPORT"
-        private const val EXTRA_REPORT = "report"
         private const val EXTRA_NOTIFICATION = "notification"
 
-        /** Only report export requires an authentication page while privacy is enabled. */
-        fun copyReportAction(context: Context, id: Int, report: String): Notification.Action {
-            val authenticate = Settings.privacyMode(context)
-            val copy = Intent(context, if (authenticate) NotificationActivity::class.java else ReportReceiver::class.java)
-                .setAction(ACTION_COPY_REPORT)
-                .putExtra(EXTRA_REPORT, report)
-                .putExtra(EXTRA_NOTIFICATION, id)
-            val flags = PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-            val pending = if (authenticate) {
-                PendingIntent.getActivity(context, id, copy, flags)
-            } else {
-                PendingIntent.getBroadcast(context, id, copy, flags)
-            }
-            return Notification.Action.Builder(null, context.getString(R.string.copy_report), pending).build()
+        private enum class CopyAction(val action: String, val extra: String, val label: Int, val confirmation: Int) {
+            REPORT(ACTION_COPY_REPORT, "report", R.string.copy_report, R.string.report_copied),
+            ADDRESS("io.github.mthli.appine.COPY_ADDRESS", "address", R.string.copy_address, R.string.address_copied),
         }
 
-        /** Copies only while unlocked, then dismisses the report notification. */
-        fun copyReport(context: Context, intent: Intent) {
-            if (Privacy.locked(context)) return
-            val report = intent.getStringExtra(EXTRA_REPORT).orEmpty()
-            if (report.isEmpty()) return
-            val clipboard = context.getSystemService(ClipboardManager::class.java)
-            clipboard.setPrimaryClip(ClipData.newPlainText(context.getString(R.string.copy_report), report))
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
-                Toast.makeText(context, R.string.report_copied, Toast.LENGTH_SHORT).show()
+        fun copyReportAction(context: Context, id: Int, report: String): Notification.Action =
+            CopyAction.REPORT.build(context, id, report, Intent().putExtra(EXTRA_NOTIFICATION, id))
+
+        internal fun copyAddressAction(context: Context, id: Int, tag: String, endpoint: String): Notification.Action =
+            CopyAction.ADDRESS.build(context, id, endpoint, Intent().setIdentifier(tag))
+
+        private fun CopyAction.build(context: Context, id: Int, text: String, intent: Intent): Notification.Action {
+            intent.setAction(action).putExtra(extra, text)
+            val flags = PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            val pending = if (Settings.privacyMode(context)) {
+                PendingIntent.getActivity(context, id, intent.setClass(context, NotificationActivity::class.java), flags)
+            } else {
+                PendingIntent.getBroadcast(context, id, intent.setClass(context, ReportReceiver::class.java), flags)
             }
-            context.getSystemService(NotificationManager::class.java).cancel(intent.getIntExtra(EXTRA_NOTIFICATION, 0))
+            return Notification.Action.Builder(null, context.getString(label), pending).build()
+        }
+
+        fun copyNotificationText(context: Context, intent: Intent) {
+            if (Privacy.locked(context)) return
+            val copy = CopyAction.entries.firstOrNull { it.action == intent.action } ?: return
+            val text = intent.getStringExtra(copy.extra)?.takeIf { it.isNotEmpty() } ?: return
+            val clipboard = context.getSystemService(ClipboardManager::class.java)
+            clipboard.setPrimaryClip(ClipData.newPlainText(context.getString(copy.label), text))
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+                Toast.makeText(context, copy.confirmation, Toast.LENGTH_SHORT).show()
+            }
+            if (copy == CopyAction.REPORT) {
+                context.getSystemService(NotificationManager::class.java).cancel(intent.getIntExtra(EXTRA_NOTIFICATION, 0))
+            }
         }
 
         /** Control actions do not export content and remain available while locked. */

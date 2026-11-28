@@ -5,13 +5,13 @@
 >
 > Verified: 2026-11-14 (split out of the android/terminal full mapping of 2026-11-14; the boundary was checked against the source at the split)
 >
-> Maintained: 2026-11-15 (targeted verification only since the full mapping; latest change: repoint dependencies to the split module maps)
+> Maintained: 2026-11-28 (targeted verification only since the full mapping; latest change: authenticated copying for network service addresses)
 
 ## Responsibilities
 
 `android/privacy` owns the app-wide authentication gate, process-local unlock state, secure
 activity and dialog windows, the locked-page shield, fresh authorization for diagnostic exports,
-and the activity that authenticates private notification report copies.
+and the activity that authenticates private notification address and report copies.
 
 Root: `Privacy.kt` and `NotificationActivity.kt` in
 `android/app/src/main/java/io/github/mthli/appine/`, and `layout/privacy_shield.xml`,
@@ -29,7 +29,7 @@ their own last-moment input, clipboard, browser and export checks.
 - `Privacy` — process-local authentication and epoch, with a `Gate` per FragmentActivity and a
   `Request` ViewModel holding that activity's authentication purpose, epoch snapshot and completion.
   `ExportAuthorization` scopes fresh log-export approval; `NotificationActivity` authenticates
-  private report-copy actions before finishing.
+  private notification copy actions before finishing.
 - `Purpose` — separates ordinary unlock, enabling, disabling and fresh diagnostic-export
   authentication; ordinary page unlock never delivers an `ExportAuthorization`.
 
@@ -41,8 +41,8 @@ their own last-moment input, clipboard, browser and export checks.
   export actions; `Listener.onPrivacyUnlocked` and `ExportListener.onLogExportAuthorized`
   return control to their activity.
 - `protect` registers dialog windows; `addListener` and `removeListener` notify mode consumers.
-- Non-exported `NotificationActivity` receives private report-copy intents, delegates the copy
-  to `Notifications.copyReport` after unlock, clears its intent and finishes.
+- Non-exported `NotificationActivity` receives private notification copy intents, delegates the copy
+  to `Notifications.copyNotificationText` after unlock, clears its intent and finishes.
 
 ## Data flow / lifecycle
 
@@ -65,7 +65,7 @@ their own last-moment input, clipboard, browser and export checks.
 - Each activity's ViewModel retains the prompt's purpose/generation through recreation, never through process death. Successful callbacks complete only when resumed with an interactive, unlocked device; report-copy/clipboard/input checks also refuse access while no page is resumed.
 - Enabled pages and all app dialogs use `FLAG_SECURE`; `showPrivate`/`Privacy.protect` track dialog windows weakly and update existing ones on changes. The shield also covers restored dialog windows. Terminal input, clipboard answers, browser launches and title toasts check the gate; pausing cancels title toasts and denies an open clipboard question.
 - `privacy_shield.xml` presents a decorative lock, heading, authentication hint, filled Unlock button and text Leave button using the covered page's theme. Its scrollable content centers within system insets, has 24 dp horizontal/32 dp vertical padding and caps the inner column at 360 dp as the window resizes; text and buttons can grow with the font scale.
-- Only report-copy actions created during privacy mode enter `NotificationActivity`, never the exported launcher. It copies after the gate opens and then finishes. Normal report copying uses a non-exported receiver; exit, download cancellation and running-policy actions run directly in the service even while locked. Background programs, saved terminals and rootfs data are retained; this is access protection, not encryption or history removal.
+- Only notification clipboard actions created during privacy mode enter `NotificationActivity`, never the exported launcher. It copies after the gate opens and then finishes. Normal notification copying uses a non-exported receiver; exit, download cancellation and running-policy actions run directly in the service even while locked. Background programs, saved terminals and rootfs data are retained; this is access protection, not encryption or history removal.
 
 ## Dependencies (inbound / outbound)
 
@@ -78,13 +78,13 @@ their own last-moment input, clipboard, browser and export checks.
   before collection/handoff and protects restored dialogs.
 - android/vtview: copy/paste access and preview dialogs. android/licenses' activities receive
   the same automatic lifecycle protection as every other FragmentActivity.
-- android/service: mode listeners and clipboard guards; android/reports: private report-copy
+- android/service: mode listeners and clipboard guards; android/reports: private notification copy
   action intents and non-ongoing notification redaction.
 
 ### Outbound
 
 - android/service: `Settings.privacyMode`/`setPrivacyMode`; android/reports:
-  `Notifications.copyReport`; android/documents: `revokeAccess` and `rootsChanged` when mode changes.
+  `Notifications.copyNotificationText`; android/documents: `revokeAccess` and `rootsChanged` when mode changes.
 - android/terminal: shared localized strings, themes, `dp` and `themeColor` helpers.
 - AndroidX Biometric 1.1.0, FragmentActivity/ViewModel lifecycle, Android's device-lock and
   interactive-state checks, secure window flags and notification manager.

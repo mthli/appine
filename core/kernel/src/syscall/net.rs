@@ -942,7 +942,14 @@ pub(super) fn listen(cx: &mut Cx<'_>, fd: i32, backlog: i32) -> SysResult {
                 let comm = cx.task.comm.get();
                 let len = comm.iter().position(|&b| b == 0).unwrap_or(comm.len());
                 let comm = String::from_utf8_lossy(&comm[..len]).into_owned();
-                cx.kr().portmap.borrow_mut().listened(comm, port, host);
+                cx.kr().portmap.borrow_mut().listened(crate::ListenEvent {
+                    comm,
+                    port,
+                    host_port: host,
+                    address: ip,
+                    dual_stack: ip.is_ipv6() && ip.is_unspecified() && !is_v6only(s),
+                    interface: s.bound_dev_if,
+                });
             }
         }
         Socket::Netlink(_) => return Err(Errno::EOPNOTSUPP),

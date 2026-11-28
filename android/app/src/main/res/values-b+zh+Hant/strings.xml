@@ -259,8 +259,11 @@
 
     <string name="channel_network">網路服務</string>
     <string name="listening_title">%1$s 正在監聽連接埠 %2$d</string>
-    <string name="listening_mapped">其他裝置請連線至連接埠 %1$d：此手機上的應用程式無法使用連接埠 %2$d，因此 Appine 已改用前者。</string>
-    <string name="listening_direct">同一網路上的其他裝置可以連線</string>
+    <string name="listening_endpoint">請連線至 %1$s</string>
+    <string name="listening_port">請連線至這支手機的區域網路 IP，連接埠為 %1$d</string>
+    <string name="listening_mapped">%1$s（連接埠 %2$d 已對應至手機的連接埠 %3$d）</string>
+    <string name="copy_address">複製位址</string>
+    <string name="address_copied">已複製位址</string>
 
     <string name="channel_problems">處理程序與服務</string>
 

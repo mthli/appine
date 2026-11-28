@@ -256,10 +256,9 @@ internal object Native {
     external fun consoleCwd(machine: Long, console: Int): String?
 
     /**
-     * Takes the ports the guest listened on for the first time on a non-loopback address (design
-     * doc §12 item 7): each entry is `<process name>\t<port>\t<host port>`. Ports below 1024 that
-     * the host refuses have been moved to other ports, and other devices must connect to the one on
-     * the host. Takes the BKL; not called on the main thread.
+     * Drains first listens on non-loopback addresses. Each row contains the guest port, host port,
+     * bind IP (or `*` for a dual-stack wildcard), bound interface index and process name, separated
+     * by tabs. Other devices connect to the host port. Takes the BKL, so call on the worker.
      */
     @JvmStatic
     external fun takeListens(machine: Long): Array<String>?

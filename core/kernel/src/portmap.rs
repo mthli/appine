@@ -27,6 +27,7 @@
 //! [`crate::netns::Bindings`].
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::net::IpAddr;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -73,6 +74,12 @@ pub struct ListenEvent {
     pub port: u16,
     /// The port on the host: other devices connect to it (the same as `port` without a mapping).
     pub host_port: u16,
+    /// Host socket address, including wildcard binds.
+    pub address: IpAddr,
+    /// An IPv6 wildcard listener that also accepts IPv4 connections.
+    pub dual_stack: bool,
+    /// Bound interface index, or zero for any interface.
+    pub interface: i32,
 }
 
 /// The initial-namespace low-port mapping registry, one for the whole kernel
@@ -132,13 +139,9 @@ impl PortMap {
     /// Records a listen on a non-loopback address: queues an event the first time a (guest port,
     /// host port) appears. Only a queued one counts as reported, so a listen dropped by a full
     /// queue is reported when it happens again.
-    pub fn listened(&mut self, comm: String, port: u16, host_port: u16) {
-        if self.events.len() < MAX_EVENTS && self.reported.insert((port, host_port)) {
-            self.events.push_back(ListenEvent {
-                comm,
-                port,
-                host_port,
-            });
+    pub fn listened(&mut self, event: ListenEvent) {
+        if self.events.len() < MAX_EVENTS && self.reported.insert((event.port, event.host_port)) {
+            self.events.push_back(event);
         }
     }
 
@@ -478,20 +481,28 @@ mod tests {
     #[test]
     fn listens_are_reported_once() {
         let mut m = PortMap::new();
-        m.listened("sshd".into(), 22, 10022);
-        m.listened("sshd".into(), 22, 10022);
-        m.listened("sshd".into(), 22, 20022);
+        let listen = |comm: &str, port, host_port| ListenEvent {
+            comm: comm.into(),
+            port,
+            host_port,
+            address: std::net::Ipv4Addr::UNSPECIFIED.into(),
+            dual_stack: false,
+            interface: 0,
+        };
+        m.listened(listen("sshd", 22, 10022));
+        m.listened(listen("sshd", 22, 10022));
+        m.listened(listen("sshd", 22, 20022));
         let e = m.take_listens();
         assert_eq!(e.len(), 2);
         assert_eq!(e[1].host_port, 20022);
         assert!(m.take_listens().is_empty());
         // A listen the full queue dropped is reported the next time
         for p in 0..MAX_EVENTS as u16 {
-            m.listened("x".into(), 1000 + p, 1000 + p);
+            m.listened(listen("x", 1000 + p, 1000 + p));
         }
-        m.listened("late".into(), 80, 10080);
+        m.listened(listen("late", 80, 10080));
         assert_eq!(m.take_listens().len(), MAX_EVENTS);
-        m.listened("late".into(), 80, 10080);
+        m.listened(listen("late", 80, 10080));
         assert_eq!(m.take_listens()[0].comm, "late");
         assert!(m.maps(22) && !m.maps(0) && !m.maps(1024));
         m.offset = 0;

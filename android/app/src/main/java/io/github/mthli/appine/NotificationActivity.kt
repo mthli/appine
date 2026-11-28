@@ -5,7 +5,7 @@ import android.os.Bundle
 import android.widget.FrameLayout
 import androidx.fragment.app.FragmentActivity
 
-/** Copies a notification's report after the shared privacy gate opens. */
+/** Copies notification text after the shared privacy gate opens. */
 class NotificationActivity : FragmentActivity(), Privacy.Listener {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -14,9 +14,7 @@ class NotificationActivity : FragmentActivity(), Privacy.Listener {
 
     override fun onPrivacyUnlocked() {
         if (isFinishing) return
-        if (intent.action == Notifications.ACTION_COPY_REPORT) {
-            Notifications.copyReport(this, intent)
-        }
+        Notifications.copyNotificationText(this, intent)
         intent = Intent()
         finish()
     }

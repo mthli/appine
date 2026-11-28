@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
 import android.content.ContextWrapper
+import android.net.InetAddresses
 import androidx.core.content.edit
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -139,6 +140,20 @@ class RunPolicyTest {
         // If second is later closed and removed, its kill is not misdelivered back to first.
         tracker.close(close = {}, onClosed = { closedField.setLong(secondPty, it) })
         assertNull(TerminalService.sessionForKill(listOf(first), 0, secondEpoch))
+    }
+
+    @Test
+    fun listenEndpointsRespectTheBindAndUseTheHostPort() {
+        val v4 = InetAddresses.parseNumericAddress("192.0.2.1")
+        val v6 = InetAddresses.parseNumericAddress("2001:db8::1")
+        val local = InetAddresses.parseNumericAddress("fe80::1")
+        val lan = { sequenceOf(local, v4, v6) }
+        assertEquals("192.0.2.1:10022", Notifications.listenEndpoint("*", 10022, lan))
+        assertEquals("192.0.2.1:22", Notifications.listenEndpoint("0.0.0.0", 22, lan))
+        assertEquals("[${v6.hostAddress}]:443", Notifications.listenEndpoint("::", 443, lan))
+        assertEquals("[2001:db8::2]:443", Notifications.listenEndpoint("2001:db8::2", 443) { error("Exact bind") })
+        assertNull(Notifications.listenEndpoint("::", 22) { sequenceOf(v4, local) })
+        assertNull(Notifications.listenEndpoint("*", 22) { emptySequence() })
     }
 
     @Test

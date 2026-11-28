@@ -259,8 +259,11 @@
 
     <string name="channel_network">网络服务</string>
     <string name="listening_title">%1$s 在端口 %2$d 上监听</string>
-    <string name="listening_mapped">其他设备请连接端口 %1$d：这台手机上的 App 用不了端口 %2$d，Appine 把它换到了这里。</string>
-    <string name="listening_direct">同一网络里的其他设备连得上它</string>
+    <string name="listening_endpoint">请连接 %1$s</string>
+    <string name="listening_port">请连接这台手机的局域网 IP，端口 %1$d</string>
+    <string name="listening_mapped">%1$s（端口 %2$d 已映射到手机端口 %3$d）</string>
+    <string name="copy_address">复制地址</string>
+    <string name="address_copied">已复制地址</string>
 
     <string name="channel_problems">进程和服务</string>
 

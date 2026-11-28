@@ -1608,7 +1608,7 @@ class MachineTest {
             if (!listens.isNullOrEmpty()) break
             Thread.sleep(50)
         }
-        assertEquals("nc\t$port\t$hostPort", listens?.singleOrNull())
+        assertEquals("$port\t$hostPort\t*\t0\tnc", listens?.singleOrNull())
         // nc does not close the connection after reading all of stdin: close it once read, so nc
         // exits
         Socket("127.0.0.1", hostPort).use { s ->
