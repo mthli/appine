@@ -9,6 +9,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.content.res.Configuration
+import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
 import android.text.SpannableStringBuilder
@@ -615,21 +616,44 @@ class MainActivity : FragmentActivity(), TerminalService.Listener, Privacy.Liste
         val dialog = MaterialAlertDialogBuilder(this)
             .setTitle(R.string.port_mappings)
             .setMessage(if (boundService == null) R.string.port_mappings_unavailable else R.string.port_mappings_loading)
-            .setPositiveButton(R.string.close, null)
+            .setPositiveButton(R.string.copy_ip, null)
+            .setNegativeButton(R.string.close, null)
             .setOnDismissListener { if (portMappingsDialog === it) portMappingsDialog = null }
             .showPrivate()
         portMappingsDialog = dialog
-        boundService?.portMappings { mappings ->
+        val copy = dialog.getButton(AlertDialog.BUTTON_POSITIVE).also { it.isVisible = false }
+        boundService?.portMappings { mappings, lanIp ->
             if (!dialog.isShowing) return@portMappings
-            val message = when {
-                mappings == null || service !== boundService -> getString(R.string.port_mappings_unavailable)
-                mappings.isEmpty() -> getString(R.string.port_mappings_empty)
-                else -> mappings.joinToString("\n") { mapping ->
-                    getString(R.string.port_mapping_row, mapping.protocol, mapping.phonePort, mapping.guestPort)
-                }
+            if (mappings == null || service !== boundService) {
+                dialog.setMessage(getString(R.string.port_mappings_unavailable))
+                return@portMappings
             }
-            dialog.setMessage(message)
+            if (mappings.isEmpty()) {
+                dialog.setMessage(getString(R.string.port_mappings_empty))
+                return@portMappings
+            }
+            val rows = mappings.joinToString("\n") { mapping ->
+                getString(R.string.port_mapping_row, mapping.protocol, mapping.phonePort, mapping.guestPort)
+            }
+            if (lanIp == null) {
+                dialog.setMessage(rows)
+            } else {
+                dialog.setMessage(getString(R.string.phone_lan_ip, lanIp) + "\n" + rows)
+                copy.setOnClickListener {
+                    if (Privacy.locked(this)) return@setOnClickListener
+                    copyLanIp(lanIp)
+                    dialog.dismiss()
+                }
+                copy.isVisible = true
+            }
         }
+    }
+
+    private fun copyLanIp(ip: String) {
+        getSystemService(ClipboardManager::class.java).setPrimaryClip(
+            ClipData.newPlainText(getString(R.string.copy_ip), ip),
+        )
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) showToast(getString(R.string.address_copied))
     }
 
     private fun confirmClose(session: VtSession) = confirmClose(listOf(session))

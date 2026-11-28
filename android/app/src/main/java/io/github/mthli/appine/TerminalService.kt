@@ -1011,15 +1011,18 @@ class TerminalService : Service() {
     fun takeNotice(): String? = notice.also { notice = null }
 
     /** Reads the current kernel's bindings on the worker and delivers the snapshot on main. */
-    internal fun portMappings(result: (List<PortMapping>?) -> Unit) {
+    internal fun portMappings(result: (mappings: List<PortMapping>?, lanIp: String?) -> Unit) {
         val handle = machine
         if (handle == 0L) {
-            result(null)
+            result(null, null)
             return
         }
         worker.execute {
             val mappings = Native.readPortMappings(handle)
-            main.post { result(if (machine == handle) mappings else null) }
+            val lanIp = if (mappings.isNullOrEmpty()) null else lanAddresses().firstUsableLanIp()
+            main.post {
+                if (machine == handle) result(mappings, lanIp) else result(null, null)
+            }
         }
     }
 

@@ -5,13 +5,13 @@
 >
 > Verified: 2026-11-26 (full refresh: 17 adversarial claims checked independently — 14 confirmed and 3 partial corrected, plus 5 confirmed bugs/debt items recorded below)
 >
-> Maintained: 2026-11-28 (targeted verification only since the full mapping; latest change: worker-side port mapping snapshots)
+> Maintained: 2026-11-28 (targeted verification only since the full mapping; latest change: LAN address lookup for port mapping snapshots)
 
 ## Responsibilities
 
 `TerminalService` owns the guest kernel, its browser endpoint and all terminal sessions across activity stops and recreation. It coordinates import, boot, shutdown, reboot and distro replacement. It decides when guest activity needs a wake lock, when tabs need saving or trimming, and where kernel events and program requests should go. It builds foreground notification **id 1**.
 
-The module comprises `TerminalService.kt`, `BrowserBridge.kt`, `Settings.kt` and `Tabs.kt` under `android/app/src/main/java/io/github/mthli/appine/`. `android/setup` supplies the store and guest setup. `android/reports` owns channels, non-ongoing notifications, fault reports and diagnostics.
+The module comprises `TerminalService.kt`, `BrowserBridge.kt`, `LanAddresses.kt`, `Settings.kt` and `Tabs.kt` under `android/app/src/main/java/io/github/mthli/appine/`. `android/setup` supplies the store and guest setup. `android/reports` owns channels, non-ongoing notifications, fault reports and diagnostics.
 
 ## Key types
 
@@ -36,7 +36,7 @@ Main owns the session list and lifecycle flags. `starting` covers import/private
 - The manifest declares a non-exported `specialUse` service. `onCreate` enters the foreground. `onBind` returns the local binder. `onStartCommand` handles `EXIT_ALL`, `CANCEL_SWITCH`, `TOGGLE_KEEP_AWAKE` and legacy report-copy intents, and returns `START_NOT_STICKY`. Android also calls `onConfigurationChanged`, `onTrimMemory` and `onDestroy`.
 - `MainActivity` and `SettingsFragment` start and bind, call `addListener` on connection and `removeListener` on stop. Listeners receive `onProgress`, `onMachineReady(error)`, `onSessionsChanged`, `onTabStatus`, `onSettingsChanged`, `onNotice`, `onRestarting`, `onExitAll` and the program callbacks below. `takeNotice()` consumes the single pending message.
 - The activity opens and closes tabs with `createSession(account = login, cwd = null)` (passing `current?.cwd()` for new tabs) and `removeSession`, assigns `current`, and reads `sessions` and restore `focus`. Clients can inspect `machine`, `gpuAvailable`, `startError`, `progress` and `switching`, invoke `exitAll`, call `switchTo` when `canSwitch`, or cancel an active download with `cancelSwitch`.
-- `portMappings` reads live bindings on the serial worker when the terminal requests them and delivers the result on main. A missing or replaced kernel yields null.
+- `portMappings` reads live bindings on the serial worker when the terminal requests them and delivers the result on main. For nonempty bindings it also looks up the phone’s LAN IP on the worker. The dialog and listen notifications share Wi-Fi and Ethernet address selection, preferring the default network and IPv4 within each network. A missing or replaced kernel yields null for both results.
 
 ### Settings and side effects
 

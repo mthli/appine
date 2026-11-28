@@ -5,7 +5,7 @@
 >
 > Verified: 2026-11-21 (split out of the android/service full mapping of 2026-11-15; the boundary was checked against the source at the split)
 >
-> Maintained: 2026-11-28 (targeted verification only since the full mapping; latest change: listen endpoints and their clipboard action)
+> Maintained: 2026-11-28 (targeted verification only since the full mapping; latest change: shared LAN address selection for listen endpoints)
 
 ## Responsibilities
 
@@ -187,7 +187,7 @@ UI and SAF save picker (`android/settings`); installing `Diagnostics` at process
 
 ### Outbound
 
-- `TerminalService` and `Settings` (`android/service`), `Rootfs.installed` (`android/setup`),
+- `TerminalService`, `Settings` and the LAN address helpers (`android/service`), `Rootfs.installed` (`android/setup`),
   `VtSession` (`android/vt`: title and `describe`), `MainActivity` (`android/terminal`: tap
   `PendingIntent` with `EXTRA_TAB`), `Privacy` and `NotificationActivity` (`android/privacy`).
 - Android: `NotificationManager`, `ActivityManager` (exit records and traces), `ClipboardManager`,

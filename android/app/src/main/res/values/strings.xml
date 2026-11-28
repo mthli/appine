@@ -61,6 +61,8 @@
     <string name="port_mappings_empty">No active port mappings.</string>
     <string name="port_mappings_unavailable">Port mappings are unavailable.</string>
     <string name="port_mapping_row">%1$s · Linux %3$d → Phone %2$d</string>
+    <string name="phone_lan_ip">Phone LAN IP: %1$s</string>
+    <string name="copy_ip">Copy IP</string>
 
     <!-- Search -->
     <string name="find">Find</string>

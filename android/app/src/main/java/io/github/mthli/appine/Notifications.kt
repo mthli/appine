@@ -14,9 +14,7 @@ import android.icu.text.ListFormatter
 import android.icu.text.MeasureFormat
 import android.icu.util.Measure
 import android.icu.util.MeasureUnit
-import android.net.ConnectivityManager
 import android.net.InetAddresses
-import android.net.NetworkCapabilities
 import android.os.Build
 import android.os.LocaleList
 import android.widget.Toast
@@ -26,8 +24,6 @@ import io.github.mthli.appine.Notifications.Companion.KILL_NOTIFICATION_BASE
 import java.net.Inet4Address
 import java.net.Inet6Address
 import java.net.InetAddress
-import java.net.NetworkInterface
-import java.net.SocketException
 import java.text.DateFormat
 import java.time.Instant
 import java.util.Date
@@ -170,7 +166,7 @@ internal class Notifications(private val service: TerminalService) {
         val port = guest.toPortOrNull() ?: return
         val hostPort = host.toPortOrNull() ?: return
         val interfaceIndex = index.toIntOrNull() ?: return
-        val endpoint = listenEndpoint(bind, hostPort) { lanAddresses(interfaceIndex) }
+        val endpoint = listenEndpoint(bind, hostPort) { service.lanAddresses(interfaceIndex) }
         val connection = if (endpoint == null) {
             service.getString(R.string.listening_port, hostPort)
         } else {
@@ -187,28 +183,6 @@ internal class Notifications(private val service: TerminalService) {
     }
 
     private fun String.toPortOrNull(): Int? = toIntOrNull()?.takeIf { it in 1..65535 }
-
-    /** Try the default network first, then other connected LANs (for example, under a VPN). */
-    @Suppress("DEPRECATION") // A one-time snapshot when a wildcard listener is announced.
-    private fun lanAddresses(interfaceIndex: Int): Sequence<InetAddress> = sequence {
-        val cm = service.getSystemService(ConnectivityManager::class.java)
-        for (network in (listOfNotNull(cm.activeNetwork) + cm.allNetworks).distinct()) {
-            val caps = cm.getNetworkCapabilities(network) ?: continue
-            if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)) continue
-            if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) &&
-                !caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) continue
-
-            val link = cm.getLinkProperties(network) ?: continue
-            if (interfaceIndex != 0 && interfaceIndex != indexOfInterface(link.interfaceName)) continue
-            yieldAll(link.linkAddresses.map { it.address }.sortedBy { it !is Inet4Address })
-        }
-    }
-
-    private fun indexOfInterface(name: String?): Int? = try {
-        name?.let { NetworkInterface.getByName(it)?.index }
-    } catch (_: SocketException) {
-        null
-    }
 
     /**
      * The kernel layer ended process [comm] for the reason [text] says, each report a notification
@@ -423,18 +397,12 @@ internal class Notifications(private val service: TerminalService) {
 
         /** Wildcards need a LAN address of the appropriate family. Link-local IPv6 needs a peer-side zone. */
         internal fun listenEndpoint(bind: String, port: Int, lanAddresses: () -> Sequence<InetAddress>): String? {
-            fun usable(ip: InetAddress) = !ip.isAnyLocalAddress && !ip.isLoopbackAddress && !ip.isMulticastAddress &&
-                !(ip is Inet6Address && ip.isLinkLocalAddress)
-
-            fun Sequence<InetAddress>.firstUsableAddress() =
-                firstOrNull(::usable)?.hostAddress?.substringBefore('%')
-
             val address = when (bind) {
-                "*" -> lanAddresses().firstUsableAddress()
-                "::" -> lanAddresses().filterIsInstance<Inet6Address>().firstUsableAddress()
-                "0.0.0.0" -> lanAddresses().filterIsInstance<Inet4Address>().firstUsableAddress()
+                "*" -> lanAddresses().firstUsableLanIp()
+                "::" -> lanAddresses().filterIsInstance<Inet6Address>().firstUsableLanIp()
+                "0.0.0.0" -> lanAddresses().filterIsInstance<Inet4Address>().firstUsableLanIp()
                 else -> bind.takeIf {
-                    InetAddresses.isNumericAddress(it) && usable(InetAddresses.parseNumericAddress(it))
+                    InetAddresses.isNumericAddress(it) && InetAddresses.parseNumericAddress(it).isUsableLanAddress()
                 }
             } ?: return null
             return if (':' in address) "[$address]:$port" else "$address:$port"

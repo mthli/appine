@@ -59,6 +59,8 @@
     <string name="port_mappings_empty">目前沒有連接埠對應</string>
     <string name="port_mappings_unavailable">暫時無法讀取連接埠對應</string>
     <string name="port_mapping_row">%1$s · Linux 連接埠 %3$d → 手機連接埠 %2$d</string>
+    <string name="phone_lan_ip">手機區域網路 IP：%1$s</string>
+    <string name="copy_ip">複製 IP</string>
 
     <!-- Search -->
     <string name="find">尋找</string>
