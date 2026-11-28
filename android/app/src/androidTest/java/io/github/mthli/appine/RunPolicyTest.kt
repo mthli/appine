@@ -161,7 +161,7 @@ class RunPolicyTest {
         val target = InstrumentationRegistry.getInstrumentation().targetContext
         val manager = target.getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(
-            NotificationChannel("network", "Network", NotificationManager.IMPORTANCE_DEFAULT),
+            NotificationChannel("network", "Network", NotificationManager.IMPORTANCE_HIGH),
         )
         fun post(key: Pair<String, Int>, text: String) {
             val n = Notification.Builder(target, "network")

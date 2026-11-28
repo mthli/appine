@@ -75,7 +75,7 @@ internal class Notifications(private val service: TerminalService) {
             SESSIONS_CHANNEL_ID, service.getString(R.string.channel_sessions), NotificationManager.IMPORTANCE_LOW,
         )
         val services = NotificationChannel(
-            NETWORK_CHANNEL_ID, service.getString(R.string.channel_network), NotificationManager.IMPORTANCE_DEFAULT,
+            NETWORK_CHANNEL_ID, service.getString(R.string.channel_network), NotificationManager.IMPORTANCE_HIGH,
         )
         val problems = NotificationChannel(
             PROBLEMS_CHANNEL_ID, service.getString(R.string.channel_problems), NotificationManager.IMPORTANCE_HIGH,

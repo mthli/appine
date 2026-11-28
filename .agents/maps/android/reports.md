@@ -5,7 +5,7 @@
 >
 > Verified: 2026-11-21 (split out of the android/service full mapping of 2026-11-15; the boundary was checked against the source at the split)
 >
-> Maintained: 2026-11-25 (targeted verification only since the full mapping; latest change: key listen notifications by `(tag = "listen:<guest>:<host>", id = 1000 + guest port)`)
+> Maintained: 2026-11-28 (targeted verification only since the full mapping; latest change: high importance for new network channels)
 
 ## Responsibilities
 
@@ -154,12 +154,12 @@ UI and SAF save picker (`android/settings`); installing `Diagnostics` at process
   ICU's short units in the app's language: hours and minutes, minutes and seconds, or seconds).
   Tapping one opens the activity on that tab (`EXTRA_TAB` with the session id); showing the tab or
   closing it takes it away.
-- Channels: `sessions` (low), `network` (default), `problems` (high), `terminal` (high, named
+- Channels: `sessions` (low), `network` (high), `problems` (high), `terminal` (high, named
   "Bells, notifications from programs and finished commands"). Their names are in the app's
   language: `onConfigurationChanged` names them anew when the configuration's languages have
   changed (and `TerminalService` reposts the ongoing notification); other notifications keep the
   language they were posted in. The bug report is in English whatever the language.
-- Newly created `terminal` and `problems` channels use `IMPORTANCE_HIGH` for heads-up alerts;
+- Newly created `network`, `terminal` and `problems` channels use `IMPORTANCE_HIGH` for heads-up alerts;
   `terminal` also enables the system's default notification vibration. Existing channels retain
   their settings: Android does not apply increased importance or new vibration defaults after
   channel creation, so older installations need heads-up alerts and vibration enabled in system
@@ -206,7 +206,7 @@ UI and SAF save picker (`android/settings`); installing `Diagnostics` at process
 
 ## To verify
 
-- Background notification vibration and heads-up alerts for terminal events and problem reports on
+- Background notification vibration and heads-up alerts for terminal events, listens and problem reports on
   physical devices (other tabs, backgrounded app, new vs existing channels adjusted in system
   settings, Do Not Disturb and vendor-specific suppression).
 - Abrupt native-crash capture, real ANR/native trace attachments and vendor logcat availability in
