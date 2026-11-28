@@ -58,7 +58,7 @@
     <string name="port_mappings_loading">正在讀取連接埠對應…</string>
     <string name="port_mappings_empty">目前沒有連接埠對應</string>
     <string name="port_mappings_unavailable">暫時無法讀取連接埠對應</string>
-    <string name="port_mapping_row">%1$s · 手機連接埠 %2$d → Linux 連接埠 %3$d</string>
+    <string name="port_mapping_row">%1$s · Linux 連接埠 %3$d → 手機連接埠 %2$d</string>
 
     <!-- Search -->
     <string name="find">尋找</string>
